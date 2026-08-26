@@ -1,0 +1,30 @@
+# Merchant FinPilot — dependencies
+#
+# IMPORTANT ARCHITECTURAL CONSTRAINT (see ARCHITECTURE.md, ADR-001):
+#
+#   backend/domain/, backend/financial/ and backend/data/ MUST remain
+#   importable with the Python standard library ALONE. Nothing in this file
+#   is required to run the financial core or its test suite.
+#
+# Everything below belongs to the I/O boundary (HTTP API, LLM client,
+# Razorpay SDK, persistence) and is introduced only when that layer is built.
+# Do not add a dependency to the financial core. Ever.
+
+# --- HTTP / API boundary (Day 4+) ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4          # request/response + LLM tool-arg validation ONLY
+
+# --- LLM reasoning layer (Day 5+) ---
+anthropic==0.42.0
+
+# --- Razorpay integration boundary (Day 6+) ---
+razorpay==1.4.2
+
+# --- Persistence (Day 4+) ---
+SQLAlchemy==2.0.36
+
+# --- Dev / test tooling (optional; core suite runs on stdlib unittest) ---
+pytest==8.3.4
+mypy==1.14.1
+ruff==0.8.6

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONPATH=. python3.11 __TRACKED_VAR__/smoke_data.py)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest backend.tests.domain.test_metrics -v)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest backend.tests.domain.test_contracts)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest backend.tests.financial.test_calculations)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -c ' *)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest backend.tests.domain.test_metrics backend.tests.financial.test_calculations)",
+      "Bash(/opt/homebrew/bin/python3.11 -c ' *)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest discover -s backend/tests -t .)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest backend.tests.financial.test_exposure)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest backend.tests.financial.test_engine)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -)",
+      "Bash(PYTHONPATH=. timeout 300 /opt/homebrew/bin/python3.11 -m unittest backend.tests.data.test_dataset)",
+      "Bash(PYTHONPATH=. /opt/homebrew/bin/python3.11 -m unittest backend.tests.data.test_dataset)"
+    ]
+  }
+}
