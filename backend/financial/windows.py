@@ -7,13 +7,13 @@ assumed.
 """
 
 from datetime import timedelta
-from typing import Iterable, Tuple
+from typing import Iterable, List, Tuple
 
 from ..domain.errors import DomainValidationError
 from ..domain.metrics import WindowCounts
 from ..domain.window import TimeWindow
 from .counts import count_transactions
-from .population import PaymentLike, in_window
+from .population import PaymentLike, as_payment, in_window
 
 
 def split_into_buckets(window: TimeWindow, bucket_seconds: int) -> Tuple[TimeWindow, ...]:
@@ -68,9 +68,53 @@ def bucket_counts(
     Materialises the population once so every bucket sees the same data.
     Windows need not be contiguous — comparable-window selection produces
     deliberately non-contiguous sets.
+
+    Optimized: When windows form a contiguous uniform grid (e.g. 720 hourly
+    buckets), bucketing executes in a single O(N) pass using timestamp index
+    arithmetic rather than O(W * N) full scans.
     """
+    win_tuple = tuple(windows)
+    if not win_tuple:
+        return ()
+
     population = tuple(items)
+    if not population:
+        return tuple(
+            WindowCounts(window=w, counts=count_transactions(()))
+            for w in win_tuple
+        )
+
+    # Check if windows form a contiguous uniform grid
+    first_w = win_tuple[0]
+    step_sec = first_w.duration_seconds
+    is_uniform_grid = (
+        step_sec > 0
+        and len(win_tuple) > 1
+        and all(w.duration_seconds == step_sec for w in win_tuple)
+        and all(win_tuple[i].end == win_tuple[i + 1].start for i in range(len(win_tuple) - 1))
+    )
+
+    if is_uniform_grid:
+        num_windows = len(win_tuple)
+        grid_start_dt = win_tuple[0].start
+        grid_end_dt = win_tuple[-1].end
+        grid_start_ts = grid_start_dt.timestamp()
+
+        # Group payments into bucket lists
+        bucket_items: List[List[PaymentLike]] = [[] for _ in range(num_windows)]
+        for item in population:
+            p = as_payment(item)
+            if grid_start_dt <= p.created_at < grid_end_dt:
+                idx = int((p.created_at.timestamp() - grid_start_ts) // step_sec)
+                if 0 <= idx < num_windows:
+                    bucket_items[idx].append(item)
+
+        return tuple(
+            WindowCounts(window=win_tuple[i], counts=count_transactions(bucket_items[i]))
+            for i in range(num_windows)
+        )
+
     return tuple(
         WindowCounts(window=window, counts=count_transactions(in_window(population, window)))
-        for window in windows
+        for window in win_tuple
     )

@@ -1,15 +1,13 @@
-"""Deterministic incident opening.  **[Day 3 — not implemented]**
+"""Deterministic incident opening.
 
-This package contains no implementation. It exists so the contract below is
-recorded before any code is written against it (PROJECT_RULES 10.11).
+PROJECT_RULES 3.11, 4.9 / ARCHITECTURE.md §8 (ADR-006).
 
-Contract
---------
 Turns a ``FinancialMetrics`` into a decision: *does an incident exist?* Input is
 the output of ``financial.engine.compute_metrics``; output is a
-``domain.incident.FinancialIncident`` or nothing at all. No LLM call happens
-here — the agent never decides that an incident exists (PROJECT_RULES 3.11,
-ARCHITECTURE.md §8 step 1).
+``domain.incident.FinancialIncident`` or ``None``.
+
+No LLM call happens here — the agent never decides that an incident exists
+(PROJECT_RULES 3.11, ARCHITECTURE.md §8 step 1).
 
 **This is where thresholds live.** ``financial/`` measures; ``detection/``
 judges. That split is ADR-006 and PROJECT_RULES 4.9: the z-test in
@@ -33,11 +31,30 @@ Obligations
   ``INSUFFICIENT_DATA`` must abstain (ARCHITECTURE.md §19). Restraint is graded
   as heavily as detection.
 
-Open question this package resolves: **Q6** — pooled vs same-hour-of-day
-baseline as the default. Both estimators are implemented in
-``financial.baseline``; the default is to be chosen from measured false-alarm
-rates on the scenario set, not by preference (ARCHITECTURE.md §22).
-
 Dependencies: may import ``domain`` and ``financial``. Must not import
 ``agent``, ``execution`` or ``api`` (PROJECT_RULES 10.8).
 """
+
+from .config import DEFAULT_RULE_VERSION, DetectionConfig
+from .detector import Detector, detect_from_payments, detect_incident
+from .evaluator import (
+    DetectionEvaluation,
+    DetectionReason,
+    determine_severity,
+    evaluate_metrics,
+)
+
+__all__ = [
+    # Configuration
+    "DetectionConfig",
+    "DEFAULT_RULE_VERSION",
+    # Evaluation
+    "DetectionEvaluation",
+    "DetectionReason",
+    "evaluate_metrics",
+    "determine_severity",
+    # Detection
+    "Detector",
+    "detect_incident",
+    "detect_from_payments",
+]

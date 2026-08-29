@@ -95,17 +95,17 @@ class ActionResult:
                 raise DomainValidationError("completed_at cannot precede attempted_at")
             object.__setattr__(self, "completed_at", completed)
 
-        if self.status is ExecutionStatus.SUCCEEDED:
+        if self.status in (ExecutionStatus.SUCCEEDED, ExecutionStatus.SIMULATED):
             if self.completed_at is None:
-                raise DomainValidationError("SUCCEEDED requires completed_at")
+                raise DomainValidationError(f"{self.status.value.upper()} requires completed_at")
             if not self.provider_reference:
                 # Without an external reference there is nothing to verify the
                 # outcome against, so we cannot honestly call it a success.
                 raise DomainValidationError(
-                    "SUCCEEDED requires a provider_reference so the outcome can be verified"
+                    f"{self.status.value.upper()} requires a provider_reference so the outcome can be verified"
                 )
-        if self.status is ExecutionStatus.FAILED and not (self.error_code or self.error_message):
-            raise DomainValidationError("FAILED requires an error_code or error_message")
+        if self.status in (ExecutionStatus.FAILED, ExecutionStatus.BLOCKED) and not (self.error_code or self.error_message):
+            raise DomainValidationError(f"{self.status.value.upper()} requires an error_code or error_message")
 
     @property
     def is_ambiguous(self) -> bool:
