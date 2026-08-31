@@ -1,15 +1,19 @@
-"""Tests for Server-Sent Events (SSE) streaming, keep-alives, and ASGI compatibility.
+"""Tests for Server-Sent Events (SSE) streaming, keep-alives, and ASGI 3.0 compatibility.
 
 Validates:
-1. /api/v1/incidents/stream delivers events progressively.
-2. Final pipeline completion event is always sent with full payload.
-3. Keep-alive comments (: keepalive) are emitted during idle/latency periods.
-4. ASGI 3.0 interface handles HTTP requests and SSE streams asynchronously.
-5. Stream terminates cleanly on LLM/Gemini errors without hanging.
-6. Verification, policy, and execution gates are strictly enforced.
+1. The ASGI entrypoint is recognized as genuine ASGI3 (inspect.iscoroutinefunction returns True).
+2. WSGI FinPilotApp is recognized as standard 2-arg PEP 3333 WSGI.
+3. ASGI GET /health and /api/v1/health return 200 with healthy JSON.
+4. ASGI GET /api/v1/scenarios returns 200 with scenarios list.
+5. ASGI POST /api/v1/incidents/stream streams progressive SSE chunks.
+6. Final pipeline completion event is always sent with full payload.
+7. Keep-alive comments (: keepalive) are emitted during idle/latency periods.
+8. Stream terminates cleanly on LLM/Gemini errors without hanging.
+9. Disconnect handling and fail-closed safety gates are strictly preserved.
 """
 
 import asyncio
+import inspect
 import json
 import os
 import unittest
@@ -17,28 +21,43 @@ from unittest import mock
 
 from backend.agent.contracts import LLMMessage
 from backend.agent.provider import GeminiProvider, LLMAuthenticationError
-from backend.api.app import FinPilotApp, create_app
+from backend.api.app import FinPilotASGIApp, FinPilotApp, create_app, create_asgi_app
 from backend.audit.store import AuditLog
 from backend.db.database import Database
-from backend.server import build_app
+from backend.server import build_app, build_asgi_app
 
 
 class TestSSEStreamingAndASGI(unittest.TestCase):
     def setUp(self) -> None:
         self.db = Database(":memory:")
         self.audit_log = AuditLog()
-        self.app = build_app(mode="mock", database=self.db, audit_log=self.audit_log)
+        self.wsgi_app = build_app(mode="mock", database=self.db, audit_log=self.audit_log)
+        self.asgi_app = build_asgi_app(mode="mock", database=self.db, audit_log=self.audit_log)
 
     def tearDown(self) -> None:
         self.db.close()
 
+    def test_asgi3_callable_signature_compliance(self) -> None:
+        """Requirement 1: FinPilotASGIApp is recognized as ASGI 3.0 by Uvicorn."""
+        self.assertTrue(inspect.iscoroutinefunction(self.asgi_app.__call__))
+        self.assertTrue(inspect.iscoroutinefunction(FinPilotASGIApp.__call__))
+
+        # Verify factory returns FinPilotASGIApp
+        factory_inst = create_asgi_app()
+        self.assertIsInstance(factory_inst, FinPilotASGIApp)
+        self.assertTrue(inspect.iscoroutinefunction(factory_inst.__call__))
+
+        # Verify WSGI app is standard non-coroutine callable
+        self.assertFalse(inspect.iscoroutinefunction(self.wsgi_app.__call__))
+        self.assertIsInstance(self.wsgi_app, FinPilotApp)
+
     def test_wsgi_sse_stream_progressive_events_and_final_payload(self) -> None:
-        """Requirement 1: WSGI SSE stream delivers multiple progressive events and finishes with final payload."""
+        """Requirement 2: WSGI SSE stream delivers multiple progressive events and finishes with final payload."""
         payload = {
             "merchant_id": "merchant_test",
             "scenario_id": "upi_failure_spike",
         }
-        status_code, stream_factory = self.app.api.handle_process_incident_stream(payload)
+        status_code, stream_factory = self.wsgi_app.api.handle_process_incident_stream(payload)
         self.assertEqual(status_code, 200)
 
         generator = stream_factory()
@@ -74,11 +93,38 @@ class TestSSEStreamingAndASGI(unittest.TestCase):
         self.assertIsNotNone(final_event["payload"].get("execution_result"))
 
     def test_asgi_http_health_check(self) -> None:
-        """Requirement 2: ASGI 3.0 interface handles standard HTTP requests."""
+        """Requirement 3: ASGI 3.0 interface handles standard GET /health and /api/v1/health."""
+        for path in ("/health", "/api/v1/health"):
+            scope = {
+                "type": "http",
+                "method": "GET",
+                "path": path,
+                "headers": [],
+            }
+
+            sent_messages = []
+
+            async def dummy_receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def dummy_send(message):
+                sent_messages.append(message)
+
+            asyncio.run(self.asgi_app(scope, dummy_receive, dummy_send))
+
+            self.assertEqual(len(sent_messages), 2)
+            self.assertEqual(sent_messages[0]["type"], "http.response.start")
+            self.assertEqual(sent_messages[0]["status"], 200)
+            self.assertEqual(sent_messages[1]["type"], "http.response.body")
+            body = json.loads(sent_messages[1]["body"].decode("utf-8"))
+            self.assertEqual(body["status"], "healthy")
+
+    def test_asgi_http_scenarios(self) -> None:
+        """Requirement 4: ASGI 3.0 interface handles GET /api/v1/scenarios."""
         scope = {
             "type": "http",
             "method": "GET",
-            "path": "/api/v1/health",
+            "path": "/api/v1/scenarios",
             "headers": [],
         }
 
@@ -90,17 +136,17 @@ class TestSSEStreamingAndASGI(unittest.TestCase):
         async def dummy_send(message):
             sent_messages.append(message)
 
-        asyncio.run(self.app(scope, dummy_receive, dummy_send))
+        asyncio.run(self.asgi_app(scope, dummy_receive, dummy_send))
 
         self.assertEqual(len(sent_messages), 2)
         self.assertEqual(sent_messages[0]["type"], "http.response.start")
         self.assertEqual(sent_messages[0]["status"], 200)
-        self.assertEqual(sent_messages[1]["type"], "http.response.body")
         body = json.loads(sent_messages[1]["body"].decode("utf-8"))
-        self.assertEqual(body["status"], "healthy")
+        self.assertIn("scenarios", body)
+        self.assertGreaterEqual(len(body["scenarios"]), 11)
 
     def test_asgi_sse_streaming_progressive_delivery(self) -> None:
-        """Requirement 3: ASGI 3.0 interface streams SSE events chunk by chunk."""
+        """Requirement 5: ASGI 3.0 interface streams SSE events chunk by chunk."""
         request_body = json.dumps({
             "merchant_id": "merchant_test",
             "scenario_id": "upi_failure_spike",
@@ -127,7 +173,7 @@ class TestSSEStreamingAndASGI(unittest.TestCase):
         async def dummy_send(message):
             sent_messages.append(message)
 
-        asyncio.run(self.app(scope, dummy_receive, dummy_send))
+        asyncio.run(self.asgi_app(scope, dummy_receive, dummy_send))
 
         self.assertGreater(len(sent_messages), 3)
         self.assertEqual(sent_messages[0]["type"], "http.response.start")
@@ -143,15 +189,38 @@ class TestSSEStreamingAndASGI(unittest.TestCase):
         self.assertIn('"stage": "pipeline"', combined_text)
         self.assertIn('"status": "completed"', combined_text)
 
+    def test_asgi_lifespan_support(self) -> None:
+        """Requirement 6: ASGI lifespan startup and shutdown protocol."""
+        scope = {"type": "lifespan"}
+        messages_to_receive = [
+            {"type": "lifespan.startup"},
+            {"type": "lifespan.shutdown"},
+        ]
+        sent_messages = []
+
+        async def dummy_receive():
+            if messages_to_receive:
+                return messages_to_receive.pop(0)
+            return {"type": "lifespan.shutdown"}
+
+        async def dummy_send(message):
+            sent_messages.append(message)
+
+        asyncio.run(self.asgi_app(scope, dummy_receive, dummy_send))
+
+        self.assertEqual(len(sent_messages), 2)
+        self.assertEqual(sent_messages[0]["type"], "lifespan.startup.complete")
+        self.assertEqual(sent_messages[1]["type"], "lifespan.shutdown.complete")
+
     def test_stream_gemini_error_fails_safely_with_final_event(self) -> None:
-        """Requirement 4: When Gemini errors during streaming, error and final events are sent."""
+        """Requirement 7: When Gemini errors during streaming, error and final events are sent."""
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "invalid_key", "FINPILOT_MODE": "real"}):
             with mock.patch.object(
                 GeminiProvider,
                 "generate_turn",
                 side_effect=LLMAuthenticationError("Gemini API authentication failed"),
             ):
-                real_app = build_app(mode="real", database=self.db, audit_log=self.audit_log)
+                real_app = build_asgi_app(mode="real", database=self.db, audit_log=self.audit_log)
                 status_code, stream_factory = real_app.api.handle_process_incident_stream({
                     "merchant_id": "merchant_test",
                     "scenario_id": "upi_failure_spike",

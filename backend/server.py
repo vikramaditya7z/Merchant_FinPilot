@@ -17,7 +17,7 @@ from wsgiref.simple_server import WSGIServer, make_server
 from .agent.agent import FinancialAgent
 from .agent.contracts import LLMMessage
 from .agent.provider import GeminiProvider, LLMProvider, MockLLMProvider
-from .api.app import FinPilotApp, create_app
+from .api.app import FinPilotASGIApp, FinPilotApp, create_app
 from .api.router import FinancialIncidentAPI
 from .application.orchestrator import FinancialIncidentOrchestrator
 from .audit.store import AuditLog
@@ -242,9 +242,35 @@ def build_app(
     return FinPilotApp(api=api)
 
 
+def build_asgi_app(
+    mode: Optional[str] = None,
+    db_path: Optional[str] = None,
+    database: Optional[Database] = None,
+    api_key: Optional[str] = None,
+    custom_agent: Optional[FinancialAgent] = None,
+    custom_execution_engine: Optional[ExecutionEngine] = None,
+    audit_log: Optional[AuditLog] = None,
+    env_file: Optional[str] = None,
+) -> FinPilotASGIApp:
+    """Construct and wire all application dependencies into a dedicated FinPilotASGIApp."""
+    wsgi_app = build_app(
+        mode=mode,
+        db_path=db_path,
+        database=database,
+        api_key=api_key,
+        custom_agent=custom_agent,
+        custom_execution_engine=custom_execution_engine,
+        audit_log=audit_log,
+        env_file=env_file,
+    )
+    return FinPilotASGIApp(api=wsgi_app.api)
+
+
 def __getattr__(name: str) -> Any:
     if name == "app":
         return build_app()
+    if name in ("asgi_app", "asgi_application"):
+        return build_asgi_app()
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 

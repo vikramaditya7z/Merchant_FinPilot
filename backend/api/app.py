@@ -1,13 +1,17 @@
-"""WSGI Application interface for the FinPilot HTTP API.
+"""WSGI and ASGI Application interfaces for the FinPilot HTTP API.
 
 PROJECT_RULES 1.6, 9.11, 10.6, 10.8 / ARCHITECTURE.md §1-§17.
 
 Runs with Python standard library alone without requiring external web frameworks.
+Exposes both:
+1. FinPilotApp (WSGI) for WSGI servers (gunicorn sync/gthread, wsgiref).
+2. FinPilotASGIApp (ASGI 3.0) for ASGI servers (uvicorn, gunicorn UvicornWorker).
 """
 
+import asyncio
 import json
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
 
 from ..application.orchestrator import FinancialIncidentOrchestrator
 from ..audit.store import AuditLog
@@ -15,11 +19,8 @@ from ..db.database import Database
 from .router import FinancialIncidentAPI
 
 
-import asyncio
-
-
 class FinPilotApp:
-    """Universal WSGI and ASGI Application callable exposing the FinPilot HTTP surface."""
+    """Standard WSGI Application callable exposing the FinPilot HTTP surface."""
 
     def __init__(self, api: FinancialIncidentAPI) -> None:
         self._api = api
@@ -28,19 +29,8 @@ class FinPilotApp:
     def api(self) -> FinancialIncidentAPI:
         return self._api
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        if len(args) == 2:
-            # WSGI interface: app(environ, start_response)
-            return self.wsgi_app(args[0], args[1])
-        elif len(args) == 3:
-            # ASGI 3.0 interface: app(scope, receive, send)
-            return self.asgi_app(args[0], args[1], args[2])
-        raise TypeError(
-            f"FinPilotApp expected 2 arguments (WSGI) or 3 arguments (ASGI), got {len(args)}"
-        )
-
-    def wsgi_app(self, environ: Dict[str, Any], start_response: Callable) -> Any:
-        """Synchronous WSGI entrypoint."""
+    def __call__(self, environ: Dict[str, Any], start_response: Callable) -> List[bytes]:
+        """Synchronous PEP 3333 WSGI entrypoint."""
         method = environ.get("REQUEST_METHOD", "GET").upper()
         path = environ.get("PATH_INFO", "/")
 
@@ -165,7 +155,40 @@ class FinPilotApp:
             {"error": f"Route '{method} {path}' not found on FinPilot API."},
         )
 
-    async def asgi_app(
+    def _send_json(
+        self, start_response: Callable, status_code: int, body: Dict[str, Any]
+    ) -> List[bytes]:
+        status_text = {
+            200: "200 OK",
+            400: "400 Bad Request",
+            404: "404 Not Found",
+            405: "405 Method Not Allowed",
+            500: "500 Internal Server Error",
+        }.get(status_code, f"{status_code} Status")
+
+        data = json.dumps(body, indent=2).encode("utf-8")
+        headers = [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(data))),
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With"),
+        ]
+        start_response(status_text, headers)
+        return [data]
+
+
+class FinPilotASGIApp:
+    """Dedicated ASGI 3.0 Application wrapper exposing the FinPilot HTTP & SSE surface."""
+
+    def __init__(self, api: FinancialIncidentAPI) -> None:
+        self._api = api
+
+    @property
+    def api(self) -> FinancialIncidentAPI:
+        return self._api
+
+    async def __call__(
         self, scope: Dict[str, Any], receive: Callable, send: Callable
     ) -> None:
         """Asynchronous ASGI 3.0 entrypoint for Uvicorn / async workers."""
@@ -187,29 +210,29 @@ class FinPilotApp:
 
         # 0. CORS OPTIONS Preflight
         if method == "OPTIONS":
-            await self._send_asgi_json(send, 200, {"ok": True})
+            await self._send_json(send, 200, {"ok": True})
             return
 
         # 1. Health Check
         if method == "GET" and path in ("/api/v1/health", "/health", "/"):
             status_code, body = self._api.handle_health()
-            await self._send_asgi_json(send, status_code, body)
+            await self._send_json(send, status_code, body)
             return
 
         # 2. List Supported Scenarios
         if method == "GET" and path in ("/api/v1/scenarios", "/scenarios"):
             status_code, body = self._api.handle_list_scenarios()
-            await self._send_asgi_json(send, status_code, body)
+            await self._send_json(send, status_code, body)
             return
 
         # 3. Process Incident (Standard HTTP POST)
         if method == "POST" and path == "/api/v1/incidents/process":
-            body_bytes = await self._read_asgi_body(receive)
+            body_bytes = await self._read_body(receive)
             if body_bytes:
                 try:
                     payload = json.loads(body_bytes.decode("utf-8"))
                 except Exception as exc:
-                    await self._send_asgi_json(
+                    await self._send_json(
                         send, 400, {"error": f"Invalid JSON payload: {str(exc)}"}
                     )
                     return
@@ -219,18 +242,18 @@ class FinPilotApp:
             status_code, body = await asyncio.to_thread(
                 self._api.handle_process_incident, payload
             )
-            await self._send_asgi_json(send, status_code, body)
+            await self._send_json(send, status_code, body)
             return
 
         # 3b. Stream Process Incident (Server-Sent Events)
         if path in ("/api/v1/incidents/stream", "/api/v1/incidents/process-stream"):
             if method == "POST":
-                body_bytes = await self._read_asgi_body(receive)
+                body_bytes = await self._read_body(receive)
                 if body_bytes:
                     try:
                         payload = json.loads(body_bytes.decode("utf-8"))
                     except Exception as exc:
-                        await self._send_asgi_json(
+                        await self._send_json(
                             send, 400, {"error": f"Invalid JSON payload: {str(exc)}"}
                         )
                         return
@@ -241,7 +264,7 @@ class FinPilotApp:
                 params = parse_qs(query_string)
                 payload = {k: v[0] for k, v in params.items() if v}
             else:
-                await self._send_asgi_json(send, 405, {"error": "Method Not Allowed"})
+                await self._send_json(send, 405, {"error": "Method Not Allowed"})
                 return
 
             status_code, stream_factory = self._api.handle_process_incident_stream(payload)
@@ -282,12 +305,12 @@ class FinPilotApp:
 
         # 3c. Evaluate Live Window (Non-Scenario / Database-Driven)
         if method == "POST" and path in ("/api/v1/incidents/evaluate-live", "/api/v1/incidents/live"):
-            body_bytes = await self._read_asgi_body(receive)
+            body_bytes = await self._read_body(receive)
             if body_bytes:
                 try:
                     payload = json.loads(body_bytes.decode("utf-8"))
                 except Exception as exc:
-                    await self._send_asgi_json(
+                    await self._send_json(
                         send, 400, {"error": f"Invalid JSON payload: {str(exc)}"}
                     )
                     return
@@ -297,17 +320,17 @@ class FinPilotApp:
             status_code, body = await asyncio.to_thread(
                 self._api.handle_evaluate_live, payload
             )
-            await self._send_asgi_json(send, status_code, body)
+            await self._send_json(send, status_code, body)
             return
 
         # 4. Get Incident by ID
         if method == "GET" and path.startswith("/api/v1/incidents/"):
             incident_id = path.split("/api/v1/incidents/", 1)[1].strip()
             if not incident_id:
-                await self._send_asgi_json(send, 400, {"error": "Missing incident_id"})
+                await self._send_json(send, 400, {"error": "Missing incident_id"})
                 return
             status_code, body = self._api.handle_get_incident(incident_id)
-            await self._send_asgi_json(send, status_code, body)
+            await self._send_json(send, status_code, body)
             return
 
         # 5. Get Audit Trail
@@ -316,11 +339,11 @@ class FinPilotApp:
             params = parse_qs(query_string)
             incident_id = params.get("incident_id", [None])[0]
             status_code, body = self._api.handle_get_audit_trail(incident_id=incident_id)
-            await self._send_asgi_json(send, status_code, body)
+            await self._send_json(send, status_code, body)
             return
 
         # 404 Fallback
-        await self._send_asgi_json(
+        await self._send_json(
             send, 404, {"error": f"Route '{method} {path}' not found on FinPilot API."}
         )
 
@@ -332,7 +355,7 @@ class FinPilotApp:
             return None
 
     @staticmethod
-    async def _read_asgi_body(receive: Callable) -> bytes:
+    async def _read_body(receive: Callable) -> bytes:
         body = b""
         more_body = True
         while more_body:
@@ -342,7 +365,7 @@ class FinPilotApp:
         return body
 
     @staticmethod
-    async def _send_asgi_json(
+    async def _send_json(
         send: Callable, status_code: int, body: Dict[str, Any]
     ) -> None:
         data = json.dumps(body, indent=2).encode("utf-8")
@@ -364,28 +387,6 @@ class FinPilotApp:
             "more_body": False,
         })
 
-    def _send_json(
-        self, start_response: Callable, status_code: int, body: Dict[str, Any]
-    ) -> List[bytes]:
-        status_text = {
-            200: "200 OK",
-            400: "400 Bad Request",
-            404: "404 Not Found",
-            405: "405 Method Not Allowed",
-            500: "500 Internal Server Error",
-        }.get(status_code, f"{status_code} Status")
-
-        data = json.dumps(body, indent=2).encode("utf-8")
-        headers = [
-            ("Content-Type", "application/json; charset=utf-8"),
-            ("Content-Length", str(len(data))),
-            ("Access-Control-Allow-Origin", "*"),
-            ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
-            ("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With"),
-        ]
-        start_response(status_text, headers)
-        return [data]
-
 
 def create_app(
     api: Optional[FinancialIncidentAPI] = None,
@@ -394,7 +395,7 @@ def create_app(
     audit_log: Optional[AuditLog] = None,
     agent: Optional[Any] = None,
 ) -> FinPilotApp:
-    """Factory creating a standard WSGI-compliant FinPilot HTTP application."""
+    """Factory creating a standard WSGI PEP 3333 FinPilot application."""
     if api is not None:
         return FinPilotApp(api=api)
 
@@ -415,7 +416,35 @@ def create_app(
     )
 
 
+def create_asgi_app(
+    api: Optional[FinancialIncidentAPI] = None,
+    orchestrator: Optional[FinancialIncidentOrchestrator] = None,
+    database: Optional[Database] = None,
+    audit_log: Optional[AuditLog] = None,
+    agent: Optional[Any] = None,
+) -> FinPilotASGIApp:
+    """Factory creating a dedicated ASGI 3.0 FinPilot application for Uvicorn."""
+    if api is not None:
+        return FinPilotASGIApp(api=api)
+
+    if orchestrator is not None:
+        api_instance = FinancialIncidentAPI(
+            orchestrator=orchestrator, database=database, audit_log=audit_log
+        )
+        return FinPilotASGIApp(api=api_instance)
+
+    from ..server import build_asgi_app
+
+    return build_asgi_app(
+        database=database,
+        audit_log=audit_log,
+        custom_agent=agent,
+    )
+
+
 def __getattr__(name: str) -> Any:
     if name == "app":
         return create_app()
+    if name in ("asgi_app", "asgi_application"):
+        return create_asgi_app()
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
