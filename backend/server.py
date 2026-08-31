@@ -184,15 +184,26 @@ def build_app(
         audit_log=alog,
     )
 
-    configured_mode = (
-        mode
-        or os.environ.get("FINPILOT_MODE", "mock").lower()
-    )
+    if api_key is not None:
+        effective_api_key = api_key if api_key.strip() else None
+    else:
+        env_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+        effective_api_key = env_key if env_key else None
+
+    env_mode = (os.environ.get("FINPILOT_MODE") or "").strip().lower()
+    if mode is not None:
+        configured_mode = mode.strip().lower()
+    elif env_mode:
+        configured_mode = env_mode
+    elif effective_api_key:
+        configured_mode = "real"
+    else:
+        configured_mode = "mock"
 
     if custom_agent is not None:
         agent = custom_agent
     elif configured_mode == "real":
-        gemini_provider = GeminiProvider(api_key=api_key)
+        gemini_provider = GeminiProvider(api_key=effective_api_key or "")
         registry = create_default_registry()
         bound_tools = registry.bind(db)
         agent = FinancialAgent(
@@ -228,7 +239,13 @@ def build_app(
         audit_log=alog,
     )
 
-    return create_app(api=api)
+    return FinPilotApp(api=api)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        return build_app()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
 def run_server(

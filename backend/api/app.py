@@ -177,15 +177,30 @@ def create_app(
     orchestrator: Optional[FinancialIncidentOrchestrator] = None,
     database: Optional[Database] = None,
     audit_log: Optional[AuditLog] = None,
+    agent: Optional[Any] = None,
 ) -> FinPilotApp:
     """Factory creating a standard WSGI-compliant FinPilot HTTP application."""
     if api is not None:
         return FinPilotApp(api=api)
 
-    orch = orchestrator or FinancialIncidentOrchestrator(
-        database=database, audit_log=audit_log
+    if orchestrator is not None:
+        api_instance = FinancialIncidentAPI(
+            orchestrator=orchestrator, database=database, audit_log=audit_log
+        )
+        return FinPilotApp(api=api_instance)
+
+    # When called as a top-level WSGI factory without an explicit orchestrator,
+    # construct the complete application stack with FinancialAgent and GeminiProvider wired.
+    from ..server import build_app
+
+    return build_app(
+        database=database,
+        audit_log=audit_log,
+        custom_agent=agent,
     )
-    api_instance = FinancialIncidentAPI(
-        orchestrator=orch, database=database, audit_log=audit_log
-    )
-    return FinPilotApp(api=api_instance)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "app":
+        return create_app()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
