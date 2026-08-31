@@ -304,3 +304,52 @@ class ProcessIncidentResponse:
             "policy_decision": self.policy_decision,
             "execution_result": self.execution_result,
         }
+
+
+@dataclass(frozen=True)
+class EvaluateLiveRequest:
+    """Request contract to evaluate currently ingested database transactions."""
+
+    merchant_id: str = "merchant_default"
+    now: Optional[datetime] = None
+    window_hours: int = 1
+    baseline_days: int = 7
+    auto_orchestrate: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.merchant_id, str) or not self.merchant_id.strip():
+            raise DomainValidationError("EvaluateLiveRequest.merchant_id must be a non-empty string")
+        if isinstance(self.window_hours, bool) or not isinstance(self.window_hours, int) or self.window_hours < 1:
+            raise DomainValidationError("EvaluateLiveRequest.window_hours must be a positive int >= 1")
+        if isinstance(self.baseline_days, bool) or not isinstance(self.baseline_days, int) or self.baseline_days < 1:
+            raise DomainValidationError("EvaluateLiveRequest.baseline_days must be a positive int >= 1")
+        if self.now is not None:
+            object.__setattr__(self, "now", require_utc(self.now, "EvaluateLiveRequest.now"))
+
+
+@dataclass(frozen=True)
+class EvaluateLiveResponse:
+    """Response contract for live window evaluation."""
+
+    triggered: bool
+    merchant_id: str
+    evaluated_at: str
+    current_payment_count: int
+    baseline_payment_count: int
+    window: Dict[str, str]
+    metrics: Dict[str, Any]
+    incident: Optional[Dict[str, Any]] = None
+    pipeline_result: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "triggered": self.triggered,
+            "merchant_id": self.merchant_id,
+            "evaluated_at": self.evaluated_at,
+            "current_payment_count": self.current_payment_count,
+            "baseline_payment_count": self.baseline_payment_count,
+            "window": self.window,
+            "metrics": self.metrics,
+            "incident": self.incident,
+            "pipeline_result": self.pipeline_result,
+        }

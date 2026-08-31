@@ -18,6 +18,15 @@ venv/
 .coverage
 htmlcov/
 
+# --- Node / Frontend ---
+node_modules/
+dist/
+.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
 # --- Local data / artifacts ---
 *.sqlite3
 *.db
@@ -29,3 +38,12 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+
+# --- AI / Local tooling ---
+.claude/
+.qa-sandbox/
+
+# --- Generated reports / screenshots ---
+screenshots/
+report/
+qa_report.md

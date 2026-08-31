@@ -105,6 +105,27 @@ class FinPilotApp:
             start_response(status_text, headers)
             return stream_factory()
 
+        # 3c. Evaluate Live Window (Non-Scenario / Database-Driven)
+        if method == "POST" and path in ("/api/v1/incidents/evaluate-live", "/api/v1/incidents/live"):
+            try:
+                content_length = int(environ.get("CONTENT_LENGTH", 0))
+            except (ValueError, TypeError):
+                content_length = 0
+
+            if content_length > 0:
+                body_bytes = environ["wsgi.input"].read(content_length)
+                try:
+                    payload = json.loads(body_bytes.decode("utf-8"))
+                except Exception as exc:
+                    return self._send_json(
+                        start_response, 400, {"error": f"Invalid JSON payload: {str(exc)}"}
+                    )
+            else:
+                payload = {}
+
+            status_code, body = self._api.handle_evaluate_live(payload)
+            return self._send_json(start_response, status_code, body)
+
         # 4. Get Incident by ID
         if method == "GET" and path.startswith("/api/v1/incidents/"):
             incident_id = path.split("/api/v1/incidents/", 1)[1].strip()

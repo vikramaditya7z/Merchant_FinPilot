@@ -254,6 +254,19 @@ class Database:
         rows = self._conn.execute(sql, params).fetchall()
         return tuple(self._row_to_enriched_payment(r) for r in rows)
 
+    def get_latest_payment_timestamp(self) -> Optional[datetime]:
+        """Return the UTC created_at timestamp of the newest payment, or None."""
+        row = self._conn.execute(
+            "SELECT created_at FROM payments ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None or not row["created_at"]:
+            return None
+        return datetime.fromisoformat(row["created_at"])
+
+    def list_payments_in_window(self, window: TimeWindow) -> Tuple[EnrichedPayment, ...]:
+        """List all enriched payments whose created_at falls in [window.start, window.end)."""
+        return self.list_payments(window=window)
+
     # -----------------------------------------------------------------------
     # Incidents & Evidence repository
     # -----------------------------------------------------------------------

@@ -43,6 +43,7 @@ from .evaluator import (
     determine_severity,
     evaluate_metrics,
 )
+from .live_evaluator import LiveEvaluationResult, LiveWindowEvaluator
 
 __all__ = [
     # Configuration
@@ -57,4 +58,7 @@ __all__ = [
     "Detector",
     "detect_incident",
     "detect_from_payments",
+    # Live Evaluator
+    "LiveWindowEvaluator",
+    "LiveEvaluationResult",
 ]

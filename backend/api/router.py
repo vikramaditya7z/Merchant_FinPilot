@@ -18,15 +18,19 @@ from ..audit.store import AuditLog
 from ..data import ScenarioId, generate_scenario
 from ..data.scenarios import SCENARIOS
 from ..db.database import Database
+from ..detection.live_evaluator import LiveWindowEvaluator
 from ..domain.audit import AuditEvent
 from ..domain.enums import ComparableWindowMode
 from ..domain.errors import DomainValidationError
 from ..domain.window import require_utc
 from ..financial.engine import build_daily_hourly_baseline, compute_metrics
 from .contracts import (
+    EvaluateLiveRequest,
+    EvaluateLiveResponse,
     ProcessIncidentRequest,
     ProcessIncidentResponse,
     incident_to_dict,
+    metrics_to_dict,
 )
 
 
@@ -54,10 +58,24 @@ class FinancialIncidentAPI:
         orchestrator: FinancialIncidentOrchestrator,
         database: Optional[Database] = None,
         audit_log: Optional[AuditLog] = None,
+        live_evaluator: Optional[LiveWindowEvaluator] = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._db = database
         self._audit_log = audit_log
+        self._live_evaluator = live_evaluator or (
+            LiveWindowEvaluator(
+                database=self._db,
+                detector=self._orchestrator.detector,
+                orchestrator=self._orchestrator,
+            )
+            if self._db is not None
+            else None
+        )
+
+    @property
+    def live_evaluator(self) -> Optional[LiveWindowEvaluator]:
+        return self._live_evaluator
 
     @property
     def orchestrator(self) -> FinancialIncidentOrchestrator:
@@ -383,3 +401,64 @@ class FinancialIncidentAPI:
             "scenarios": scenario_list,
             "count": len(scenario_list),
         }
+
+    def handle_evaluate_live(self, data: Mapping[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        """Evaluate current window from ingested SQLite payments and open/orchestrate incident if anomalous."""
+        if self._db is None or self._live_evaluator is None:
+            return 500, {"error": "Database not configured; live evaluation requires persistent storage."}
+
+        try:
+            merchant_id = data.get("merchant_id", "merchant_default")
+            now_str = data.get("now")
+            now_val = datetime.fromisoformat(now_str) if now_str else None
+            window_hours = int(data.get("window_hours", 1))
+            baseline_days = int(data.get("baseline_days", 7))
+            auto_orchestrate = bool(data.get("auto_orchestrate", True))
+
+            req = EvaluateLiveRequest(
+                merchant_id=merchant_id,
+                now=now_val,
+                window_hours=window_hours,
+                baseline_days=baseline_days,
+                auto_orchestrate=auto_orchestrate,
+            )
+        except DomainValidationError as exc:
+            return 400, {"error": f"Invalid request contract: {str(exc)}"}
+        except Exception as exc:
+            return 400, {"error": f"Bad request: {str(exc)}"}
+
+        try:
+            eval_result = self._live_evaluator.evaluate_window(
+                merchant_id=req.merchant_id,
+                now=req.now,
+                window_hours=req.window_hours,
+                baseline_days=req.baseline_days,
+                auto_orchestrate=req.auto_orchestrate,
+            )
+
+            pipe_dict = None
+            if eval_result.pipeline_result is not None:
+                pipe_dict = ProcessIncidentResponse.from_pipeline_result(eval_result.pipeline_result).to_dict()
+
+            inc_dict = None
+            if eval_result.incident is not None:
+                inc_dict = incident_to_dict(eval_result.incident)
+
+            response = EvaluateLiveResponse(
+                triggered=eval_result.triggered,
+                merchant_id=eval_result.merchant_id,
+                evaluated_at=eval_result.evaluated_at.isoformat(),
+                current_payment_count=eval_result.current_payment_count,
+                baseline_payment_count=eval_result.baseline_payment_count,
+                window={
+                    "start": eval_result.window.start.isoformat(),
+                    "end": eval_result.window.end.isoformat(),
+                },
+                metrics=metrics_to_dict(eval_result.metrics),
+                incident=inc_dict,
+                pipeline_result=pipe_dict,
+            )
+
+            return 200, response.to_dict()
+        except Exception as exc:
+            return 500, {"error": f"Internal error during live evaluation: {str(exc)}"}
