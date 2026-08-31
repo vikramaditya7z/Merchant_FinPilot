@@ -6,12 +6,27 @@ import {
   StageProgressEvent,
 } from './types';
 
-// In local development, connect directly to Python WSGI server at port 8000 via CORS
-const API_BASE =
-  typeof window !== 'undefined' &&
-  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? 'http://127.0.0.1:8000/api/v1'
-    : '/api/v1';
+/**
+ * Resolves the API base endpoint with fallback:
+ * 1. Explicit environment variable: VITE_API_BASE_URL (e.g. https://merchant-finpilot-api.onrender.com)
+ * 2. Local development hostname detection (localhost / 127.0.0.1 -> http://127.0.0.1:8000/api/v1)
+ * 3. Relative path fallback (/api/v1)
+ */
+export function getApiBaseUrl(): string {
+  const envBase = (import.meta.env?.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (envBase) {
+    return envBase.endsWith('/api/v1') ? envBase : `${envBase}/api/v1`;
+  }
+  if (
+    typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ) {
+    return 'http://127.0.0.1:8000/api/v1';
+  }
+  return '/api/v1';
+}
+
+export const API_BASE = getApiBaseUrl();
 
 async function parseResponse<T = any>(res: Response, fallbackMessage: string): Promise<T> {
   const text = await res.text();
