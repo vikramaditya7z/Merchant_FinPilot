@@ -337,12 +337,21 @@ class FinancialIncidentAPI:
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
 
-            while True:
-                kind, event_data = event_queue.get()
-                if kind is sentinel:
-                    break
-                data_str = json.dumps(event_data)
-                yield f"data: {data_str}\n\n".encode("utf-8")
+            try:
+                while True:
+                    try:
+                        kind, event_data = event_queue.get(timeout=1.5)
+                    except queue.Empty:
+                        # SSE keep-alive heartbeat comment to keep connection alive during Gemini reasoning
+                        yield b": keepalive\n\n"
+                        continue
+
+                    if kind is sentinel:
+                        break
+                    data_str = json.dumps(event_data)
+                    yield f"data: {data_str}\n\n".encode("utf-8")
+            except (GeneratorExit, BrokenPipeError, ConnectionResetError):
+                pass
 
         return 200, event_stream_generator
 
