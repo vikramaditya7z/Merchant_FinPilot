@@ -198,7 +198,11 @@ def build_app(
         A fully wired FinPilotApp callable.
     """
     load_env_file(env_file)
-    db = database or Database(db_path or os.environ.get("FINPILOT_DB_PATH", ":memory:"))
+    default_db = os.environ.get("FINPILOT_DB_PATH")
+    if default_db is None and (os.environ.get("RENDER") or os.environ.get("PORT")):
+        default_db = "finpilot.db"
+    eff_db = db_path or default_db or ":memory:"
+    db = database or Database(eff_db)
     alog = audit_log or AuditLog()
     detector = Detector()
     investigator = Investigator()

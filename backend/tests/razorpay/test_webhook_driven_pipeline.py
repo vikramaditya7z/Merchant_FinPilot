@@ -979,6 +979,77 @@ class TestWebhookDrivenPipeline(unittest.TestCase):
         self.assertEqual(r1_dup.get("job_id"), r1["job_id"])
         self.assertEqual(r1_dup.get("incident_id"), r1["incident_id"])
 
+    def test_job_remains_retrievable_and_survives_cross_instance_lookups(self) -> None:
+        """Requirement: Webhook-generated jobs remain retrievable and never return 404."""
+        import os
+        import tempfile
+        from backend.api.router import FinancialIncidentAPI
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+            db_file = tf.name
+
+        try:
+            # 1. Start service on disk-backed DB
+            file_db = Database(db_file)
+            dispatcher = BackgroundJobDispatcher(max_workers=2)
+            service = RazorpayService(
+                database=file_db,
+                dispatcher=dispatcher,
+                config=self.rzp_config,
+            )
+            api = FinancialIncidentAPI(
+                orchestrator=self.orchestrator,
+                database=file_db,
+                razorpay_service=service,
+            )
+
+            # 2. Ingest webhook
+            now_dt = datetime.now(timezone.utc)
+            ts = int(now_dt.timestamp())
+            payload = {
+                "entity": "event",
+                "id": "evt_persist_1",
+                "event": "payment.failed",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": "pay_p1",
+                            "amount": 25000,
+                            "status": "failed",
+                            "method": "upi",
+                            "created_at": ts,
+                        }
+                    }
+                },
+            }
+            body = json.dumps(payload).encode("utf-8")
+            st, res = service.handle_webhook(raw_body=body, signature=compute_test_signature(body), merchant_id="merchant_p")
+            self.assertEqual(st, 200)
+            job_id = res["job_id"]
+
+            # 3. Retrieve through API
+            code, job_record = api.handle_get_incident_job(job_id)
+            self.assertEqual(code, 200)
+            self.assertEqual(job_record["job_id"], job_id)
+            self.assertEqual(job_record["merchant_id"], "merchant_p")
+
+            # 4. Simulate a new server process / worker accessing the same file
+            new_file_db = Database(db_file)
+            new_api = FinancialIncidentAPI(
+                orchestrator=self.orchestrator,
+                database=new_file_db,
+            )
+            code2, job_record2 = new_api.handle_get_incident_job(job_id)
+            self.assertEqual(code2, 200)
+            self.assertEqual(job_record2["job_id"], job_id)
+            self.assertEqual(job_record2["payment_id"], "pay_p1")
+
+            new_file_db.close()
+            file_db.close()
+        finally:
+            if os.path.exists(db_file):
+                os.remove(db_file)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ import json
 import sqlite3
 import threading
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from ..domain.audit import AuditEvent
 from ..domain.enums import (
@@ -608,8 +608,9 @@ class Database:
     # -----------------------------------------------------------------------
 
     @synchronized
-    def save_trigger(self, trigger_dict: Mapping[str, Any]) -> None:
+    def save_trigger(self, trigger_dict: Union[Mapping[str, Any], Any]) -> None:
         """Insert or replace an incident trigger job."""
+        data = trigger_dict.to_dict() if hasattr(trigger_dict, "to_dict") else dict(trigger_dict)
         query = """
         INSERT OR REPLACE INTO incident_triggers (
             job_id, incident_id, merchant_id, source, event_id,
@@ -618,20 +619,20 @@ class Database:
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
-            trigger_dict["job_id"],
-            trigger_dict["incident_id"],
-            trigger_dict["merchant_id"],
-            trigger_dict["source"],
-            trigger_dict["event_id"],
-            trigger_dict["event_type"],
-            trigger_dict["payment_id"],
-            trigger_dict["status"],
-            trigger_dict.get("attempt_count", 0),
-            trigger_dict.get("error_message"),
-            trigger_dict["created_at"],
-            trigger_dict["updated_at"],
-            trigger_dict.get("completed_at"),
-            trigger_dict.get("payload_json"),
+            data["job_id"],
+            data["incident_id"],
+            data["merchant_id"],
+            data["source"],
+            data["event_id"],
+            data["event_type"],
+            data["payment_id"],
+            data["status"],
+            data.get("attempt_count", 0),
+            data.get("error_message"),
+            data["created_at"],
+            data["updated_at"],
+            data.get("completed_at"),
+            data.get("payload_json"),
         )
         with self._conn:
             self._conn.execute(query, params)
