@@ -20,5 +20,14 @@ __all__ = [
     "ExecutionResult",
     "ExecutionAdapter",
     "SimulatedExecutionAdapter",
+    "RazorpayExecutionAdapter",
     "ExecutionStore",
 ]
+
+
+def __getattr__(name: str):
+    if name == "RazorpayExecutionAdapter":
+        from ..razorpay.adapter import RazorpayExecutionAdapter
+        return RazorpayExecutionAdapter
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+

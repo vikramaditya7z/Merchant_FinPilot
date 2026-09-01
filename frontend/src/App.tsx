@@ -203,7 +203,7 @@ export const App: React.FC = () => {
     });
 
     try {
-      const handleLiveEvent = (event: StageProgressEvent) => {
+      const handleLiveEvent = async (event: StageProgressEvent) => {
         if (sessionRunIdRef.current !== currentSessionId) return;
 
         if (!activeRunIdRef.current && event.run_id) {
@@ -289,6 +289,15 @@ export const App: React.FC = () => {
             };
           });
         }
+
+        // Allow the browser compositor and React to paint each distinct stage transition
+        await new Promise<void>((resolve) => {
+          if (typeof window !== 'undefined' && window.requestAnimationFrame) {
+            window.requestAnimationFrame(() => resolve());
+          } else {
+            setTimeout(resolve, 0);
+          }
+        });
       };
 
       const finalRes = await apiClient.processIncidentStream(

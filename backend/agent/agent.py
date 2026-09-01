@@ -12,7 +12,7 @@ Security & Architectural Invariants:
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from ..audit.store import AuditLog
 from ..domain.canonical import canonical_json, digest

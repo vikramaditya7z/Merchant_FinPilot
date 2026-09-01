@@ -67,6 +67,40 @@ resolves to the installed SDK and not to itself — correct, but only while
 ``backend/`` is never placed on ``sys.path`` (the suite runs with
 ``PYTHONPATH=.`` from the repository root, so it isn't). The name is prescribed
 by ARCHITECTURE.md §6.1 and is left as-is rather than changed unilaterally; if
-the SDK is adopted on Day 4 and the collision bites, renaming this package to
-``razorpay_gateway`` is the fix, and it requires an ARCHITECTURE.md amendment.
 """
+
+from .adapter import RazorpayExecutionAdapter
+from .client import (
+    RazorpayAPIError,
+    RazorpayAuthError,
+    RazorpayClient,
+    RazorpayConnectionError,
+    RazorpayError,
+    RazorpayNotFoundError,
+    RazorpayServerError,
+    RazorpayTimeoutError,
+)
+from .config import RazorpayConfig
+from .reconciler import RazorpayReconciler, ReconciliationReport, ReconciliationStatus
+from .service import RazorpayService
+from .webhook import RazorpayWebhookHandler, WebhookProcessingResult
+
+__all__ = [
+    "RazorpayConfig",
+    "RazorpayClient",
+    "RazorpayWebhookHandler",
+    "WebhookProcessingResult",
+    "RazorpayService",
+    "RazorpayExecutionAdapter",
+    "RazorpayReconciler",
+    "ReconciliationStatus",
+    "ReconciliationReport",
+    "RazorpayError",
+    "RazorpayAuthError",
+    "RazorpayNotFoundError",
+    "RazorpayAPIError",
+    "RazorpayServerError",
+    "RazorpayTimeoutError",
+    "RazorpayConnectionError",
+]
+

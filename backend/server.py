@@ -25,11 +25,12 @@ from .db.database import Database
 from .detection.detector import Detector
 from .domain.enums import IntentAction, TargetEntityType
 from .domain.incident import FinancialIncident
-from .execution.adapters import SimulatedExecutionAdapter
+from .execution.adapters import ExecutionAdapter, RazorpayExecutionAdapter, SimulatedExecutionAdapter
 from .execution.engine import ExecutionEngine
 from .execution.store import ExecutionStore
 from .investigation.investigator import Investigator
 from .policy.engine import PolicyEngine
+from .razorpay.service import RazorpayService
 from .tools.registry import create_default_registry
 from .verification.verifier import FinancialVerifier
 
@@ -151,7 +152,10 @@ def build_app(
     api_key: Optional[str] = None,
     custom_agent: Optional[FinancialAgent] = None,
     custom_execution_engine: Optional[ExecutionEngine] = None,
+    custom_execution_adapter: Optional[ExecutionAdapter] = None,
+    execution_mode: Optional[str] = None,
     audit_log: Optional[AuditLog] = None,
+    razorpay_service: Optional[RazorpayService] = None,
     env_file: Optional[str] = None,
 ) -> FinPilotApp:
     """Construct and wire all application dependencies into a FinPilotApp.
@@ -163,7 +167,10 @@ def build_app(
         api_key: Optional Gemini API key (defaults to GEMINI_API_KEY environment variable).
         custom_agent: Optional custom agent instance for test injection.
         custom_execution_engine: Optional custom ExecutionEngine for test injection.
+        custom_execution_adapter: Optional custom ExecutionAdapter for test injection.
+        execution_mode: 'simulated' or 'razorpay_test'. Defaults to env FINPILOT_EXECUTION_MODE or 'simulated'.
         audit_log: Optional AuditLog instance.
+        razorpay_service: Optional RazorpayService instance.
         env_file: Optional path to .env file to load.
 
     Returns:
@@ -177,7 +184,17 @@ def build_app(
     verifier = FinancialVerifier()
     policy_engine = PolicyEngine()
     exec_store = ExecutionStore()
-    adapter = SimulatedExecutionAdapter()
+
+    env_exec_mode = (os.environ.get("FINPILOT_EXECUTION_MODE") or "simulated").strip().lower()
+    eff_exec_mode = execution_mode.strip().lower() if execution_mode else env_exec_mode
+
+    if custom_execution_adapter is not None:
+        adapter = custom_execution_adapter
+    elif eff_exec_mode == "razorpay_test":
+        adapter = RazorpayExecutionAdapter()
+    else:
+        adapter = SimulatedExecutionAdapter()
+
     execution_engine = custom_execution_engine or ExecutionEngine(
         adapter=adapter,
         store=exec_store,
@@ -233,10 +250,17 @@ def build_app(
         audit_log=alog,
     )
 
+    rzp_service = razorpay_service or RazorpayService(
+        database=db,
+        audit_log=alog,
+        execution_store=exec_store,
+    )
+
     api = FinancialIncidentAPI(
         orchestrator=orchestrator,
         database=db,
         audit_log=alog,
+        razorpay_service=rzp_service,
     )
 
     return FinPilotApp(api=api)
@@ -249,7 +273,10 @@ def build_asgi_app(
     api_key: Optional[str] = None,
     custom_agent: Optional[FinancialAgent] = None,
     custom_execution_engine: Optional[ExecutionEngine] = None,
+    custom_execution_adapter: Optional[ExecutionAdapter] = None,
+    execution_mode: Optional[str] = None,
     audit_log: Optional[AuditLog] = None,
+    razorpay_service: Optional[RazorpayService] = None,
     env_file: Optional[str] = None,
 ) -> FinPilotASGIApp:
     """Construct and wire all application dependencies into a dedicated FinPilotASGIApp."""
@@ -260,7 +287,10 @@ def build_asgi_app(
         api_key=api_key,
         custom_agent=custom_agent,
         custom_execution_engine=custom_execution_engine,
+        custom_execution_adapter=custom_execution_adapter,
+        execution_mode=execution_mode,
         audit_log=audit_log,
+        razorpay_service=razorpay_service,
         env_file=env_file,
     )
     return FinPilotASGIApp(api=wsgi_app.api)

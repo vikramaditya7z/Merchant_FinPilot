@@ -92,7 +92,7 @@ export class FinPilotApiClient {
       incident_id?: string;
       context_notes?: string;
     },
-    onEvent: (event: StageProgressEvent) => void,
+    onEvent: (event: StageProgressEvent) => Promise<void> | void,
     signal?: AbortSignal
   ): Promise<ProcessIncidentResponse> {
     const res = await fetch(`${API_BASE}/incidents/stream`, {
@@ -135,7 +135,7 @@ export class FinPilotApiClient {
             if (jsonStr) {
               try {
                 const event: StageProgressEvent = JSON.parse(jsonStr);
-                onEvent(event);
+                await onEvent(event);
                 if (event.stage === 'pipeline') {
                   if (event.payload) {
                     finalPayload = event.payload;

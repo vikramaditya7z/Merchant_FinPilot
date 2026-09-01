@@ -31,6 +31,33 @@ class ExecutionStore:
         """Check if an idempotency key has already been recorded."""
         return idempotency_key in self._results_by_key
 
+    def get_by_provider_reference(self, provider_reference: str) -> Optional[ExecutionResult]:
+        """Fetch previously recorded execution result by provider reference ID."""
+        if not provider_reference:
+            return None
+        for res in reversed(self._results_list):
+            if res.provider_reference == provider_reference:
+                return res
+        return None
+
+    def get_by_execution_id(self, execution_id: str) -> Optional[ExecutionResult]:
+        """Fetch previously recorded execution result by execution ID."""
+        if not execution_id:
+            return None
+        for res in reversed(self._results_list):
+            if res.execution_id == execution_id:
+                return res
+        return None
+
+    def update(self, result: ExecutionResult) -> None:
+        """Update an existing execution result in place."""
+        self._results_by_key[result.idempotency_key] = result
+        for idx, res in enumerate(self._results_list):
+            if res.idempotency_key == result.idempotency_key:
+                self._results_list[idx] = result
+                return
+        self._results_list.append(result)
+
     def list_results(self) -> List[ExecutionResult]:
         """Return all recorded execution results."""
         return list(self._results_list)
@@ -38,3 +65,4 @@ class ExecutionStore:
     def count(self) -> int:
         """Return count of recorded execution results."""
         return len(self._results_list)
+

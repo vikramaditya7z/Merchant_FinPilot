@@ -55,6 +55,10 @@ class ExecutionEngine:
     def store(self) -> ExecutionStore:
         return self._store
 
+    @property
+    def adapter(self) -> ExecutionAdapter:
+        return self._adapter
+
     def execute(
         self,
         decision: PolicyDecision,

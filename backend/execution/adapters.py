@@ -86,3 +86,11 @@ class SimulatedExecutionAdapter(ExecutionAdapter):
             is_simulation=True,
             message=msg,
         )
+
+
+def __getattr__(name: str):
+    if name == "RazorpayExecutionAdapter":
+        from ..razorpay.adapter import RazorpayExecutionAdapter
+        return RazorpayExecutionAdapter
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+

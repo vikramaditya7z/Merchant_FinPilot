@@ -105,7 +105,7 @@ class FinPilotApp:
                 ("X-Accel-Buffering", "no"),
                 ("Access-Control-Allow-Origin", "*"),
                 ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-                ("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With"),
+                ("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With, X-Razorpay-Signature"),
             ]
             status_text = "200 OK" if status_code == 200 else f"{status_code} Bad Request"
             start_response(status_text, headers)
@@ -130,6 +130,26 @@ class FinPilotApp:
                 payload = {}
 
             status_code, body = self._api.handle_evaluate_live(payload)
+            return self._send_json(start_response, status_code, body)
+
+        # 3d. Razorpay Webhook Ingestion
+        if method == "POST" and path in ("/api/v1/webhooks/razorpay", "/webhooks/razorpay"):
+            try:
+                content_length = int(environ.get("CONTENT_LENGTH", 0))
+            except (ValueError, TypeError):
+                content_length = 0
+
+            body_bytes = environ["wsgi.input"].read(content_length) if content_length > 0 else b""
+            signature = environ.get("HTTP_X_RAZORPAY_SIGNATURE")
+            query_string = environ.get("QUERY_STRING", "")
+            params = parse_qs(query_string)
+            merchant_id = params.get("merchant_id", [None])[0]
+
+            status_code, body = self._api.handle_razorpay_webhook(
+                raw_body=body_bytes,
+                signature=signature,
+                merchant_id=merchant_id,
+            )
             return self._send_json(start_response, status_code, body)
 
         # 4. Get Incident by ID
@@ -172,7 +192,7 @@ class FinPilotApp:
             ("Content-Length", str(len(data))),
             ("Access-Control-Allow-Origin", "*"),
             ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
-            ("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With"),
+            ("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With, X-Razorpay-Signature"),
         ]
         start_response(status_text, headers)
         return [data]
@@ -278,7 +298,7 @@ class FinPilotASGIApp:
                     (b"x-accel-buffering", b"no"),
                     (b"access-control-allow-origin", b"*"),
                     (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
-                    (b"access-control-allow-headers", b"Content-Type, Authorization, Accept, Origin, X-Requested-With"),
+                    (b"access-control-allow-headers", b"Content-Type, Authorization, Accept, Origin, X-Requested-With, X-Razorpay-Signature"),
                 ],
             })
 
@@ -319,6 +339,28 @@ class FinPilotASGIApp:
 
             status_code, body = await asyncio.to_thread(
                 self._api.handle_evaluate_live, payload
+            )
+            await self._send_json(send, status_code, body)
+            return
+
+        # 3d. Razorpay Webhook Ingestion
+        if method == "POST" and path in ("/api/v1/webhooks/razorpay", "/webhooks/razorpay"):
+            body_bytes = await self._read_body(receive)
+            signature = None
+            for h_key, h_val in scope.get("headers", []):
+                if h_key.lower() == b"x-razorpay-signature":
+                    signature = h_val.decode("utf-8", errors="ignore")
+                    break
+
+            query_string = scope.get("query_string", b"").decode("utf-8")
+            params = parse_qs(query_string)
+            merchant_id = params.get("merchant_id", [None])[0]
+
+            status_code, body = await asyncio.to_thread(
+                self._api.handle_razorpay_webhook,
+                raw_body=body_bytes,
+                signature=signature,
+                merchant_id=merchant_id,
             )
             await self._send_json(send, status_code, body)
             return
@@ -374,7 +416,7 @@ class FinPilotASGIApp:
             (b"content-length", str(len(data)).encode("ascii")),
             (b"access-control-allow-origin", b"*"),
             (b"access-control-allow-methods", b"GET, POST, PUT, DELETE, OPTIONS"),
-            (b"access-control-allow-headers", b"Content-Type, Authorization, Accept, Origin, X-Requested-With"),
+            (b"access-control-allow-headers", b"Content-Type, Authorization, Accept, Origin, X-Requested-With, X-Razorpay-Signature"),
         ]
         await send({
             "type": "http.response.start",

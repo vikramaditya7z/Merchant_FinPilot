@@ -13,6 +13,17 @@ export const ExecutionResultCard: React.FC<ExecutionResultCardProps> = ({
   const [copied, setCopied] = useState(false);
   const status = timing?.status || (execution ? 'completed' : 'waiting');
 
+  const isRazorpay = Boolean(
+    execution?.provider_reference?.startsWith('plink_') ||
+    execution?.message?.toLowerCase().includes('razorpay')
+  );
+  const isReconciled = Boolean(
+    execution?.message?.toLowerCase().includes('verified paid') ||
+    execution?.message?.toLowerCase().includes('reconciled')
+  );
+  const urlMatch = execution?.message ? execution.message.match(/(https:\/\/[^\s\)]+)/) : null;
+  const paymentLinkUrl = urlMatch ? urlMatch[1] : null;
+
   if (!execution && status === 'waiting') {
     return (
       <div id="stage-execution" className="w-full bg-[#0B1017] border border-slate-800/80 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">
@@ -94,15 +105,17 @@ export const ExecutionResultCard: React.FC<ExecutionResultCardProps> = ({
       {/* Stage Header */}
       <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
         <div className="flex items-center gap-3">
-          <span className="text-xs font-mono text-slate-500 font-medium">06 / SIMULATED EXECUTION</span>
+          <span className="text-xs font-mono text-slate-500 font-medium">
+            06 / {isRazorpay ? 'RAZORPAY TEST EXECUTION' : 'SIMULATED EXECUTION'}
+          </span>
           <span className="text-slate-700">•</span>
           <span className="text-xs font-mono uppercase tracking-wider text-amber-400 font-semibold">
-            Simulated Execution Boundary & Mutator
+            {isRazorpay ? 'Razorpay Sandbox Execution & Reconciliation' : 'Simulated Execution Boundary & Mutator'}
           </span>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[10px] font-mono uppercase tracking-widest font-bold px-2 py-0.5 rounded-sm bg-amber-950/40 text-amber-400 border border-amber-800/40">
-            FAIL-CLOSED • SIMULATED ONLY
+            {isRazorpay ? 'RAZORPAY TEST MODE • TEST API ONLY' : 'FAIL-CLOSED • SIMULATED ONLY'}
           </span>
           <span className="text-[10px] font-mono text-slate-500">
             {execution.completed_at ? new Date(execution.completed_at).toLocaleTimeString() : 'In-flight'}
@@ -114,20 +127,26 @@ export const ExecutionResultCard: React.FC<ExecutionResultCardProps> = ({
       <div className="p-6 rounded-sm border bg-[#18120B] border-amber-900/60 text-amber-400 flex items-center justify-between">
         <div className="flex items-baseline gap-6">
           <div className="text-3xl font-mono font-bold tracking-tight uppercase">
-            {isDuplicate ? 'IDEMPOTENT / CACHED' : 'SIMULATED EXECUTION'}
+            {isDuplicate
+              ? 'IDEMPOTENT / CACHED'
+              : isRazorpay
+              ? 'RAZORPAY TEST EXECUTION'
+              : 'SIMULATED EXECUTION'}
           </div>
           <div>
             <div className="text-xs font-mono font-bold tracking-widest uppercase">
               STATUS: {execution.status.toUpperCase()}
             </div>
             <div className="text-xs font-mono opacity-70">
-              No live financial balance mutated • Pure simulated environment
+              {isRazorpay
+                ? 'Razorpay TEST Sandbox • Real Test Rail Mutation'
+                : 'No live financial balance mutated • Pure simulated environment'}
             </div>
           </div>
         </div>
 
         <div className="px-4 py-2 rounded-sm border font-mono font-bold text-xs uppercase tracking-widest bg-amber-950/80 border-amber-700/80 text-amber-300">
-          🔒 FAIL-CLOSED
+          {isReconciled ? '✓ RECONCILED (PAID)' : '🔒 FAIL-CLOSED (TEST ONLY)'}
         </div>
       </div>
 
@@ -148,8 +167,8 @@ export const ExecutionResultCard: React.FC<ExecutionResultCardProps> = ({
 
             <div className="flex justify-between items-center border-b border-slate-800/60 pb-3">
               <span className="text-slate-500 text-[10px] uppercase">Outcome State</span>
-              <span className={isDuplicate ? 'text-indigo-300 font-bold' : 'text-emerald-400 font-bold'}>
-                {isDuplicate ? 'IDEMPOTENT SKIPPED' : 'COMPLETED'}
+              <span className={isReconciled ? 'text-emerald-400 font-bold' : isDuplicate ? 'text-indigo-300 font-bold' : 'text-emerald-400 font-bold'}>
+                {isReconciled ? 'RECONCILED (PAID)' : isDuplicate ? 'IDEMPOTENT SKIPPED' : 'COMPLETED'}
               </span>
             </div>
 
@@ -157,6 +176,20 @@ export const ExecutionResultCard: React.FC<ExecutionResultCardProps> = ({
               <span className="text-slate-500 text-[10px] uppercase">Provider Reference</span>
               <span className="text-slate-200 font-semibold">{execution.provider_reference}</span>
             </div>
+
+            {paymentLinkUrl && (
+              <div className="flex justify-between items-center border-b border-slate-800/60 pb-3">
+                <span className="text-slate-500 text-[10px] uppercase">Payment Link URL</span>
+                <a
+                  href={paymentLinkUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-cyan-400 hover:text-cyan-300 font-semibold underline truncate max-w-[280px]"
+                >
+                  {paymentLinkUrl} ↗
+                </a>
+              </div>
+            )}
 
             <div className="flex justify-between items-center border-b border-slate-800/60 pb-3">
               <span className="text-slate-500 text-[10px] uppercase">Idempotency Key</span>

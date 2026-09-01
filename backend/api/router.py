@@ -24,6 +24,7 @@ from ..domain.enums import ComparableWindowMode
 from ..domain.errors import DomainValidationError
 from ..domain.window import require_utc
 from ..financial.engine import build_daily_hourly_baseline, compute_metrics
+from ..razorpay.service import RazorpayService
 from .contracts import (
     EvaluateLiveRequest,
     EvaluateLiveResponse,
@@ -59,6 +60,7 @@ class FinancialIncidentAPI:
         database: Optional[Database] = None,
         audit_log: Optional[AuditLog] = None,
         live_evaluator: Optional[LiveWindowEvaluator] = None,
+        razorpay_service: Optional[RazorpayService] = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._db = database
@@ -72,6 +74,15 @@ class FinancialIncidentAPI:
             if self._db is not None
             else None
         )
+        self._razorpay_service = razorpay_service or (
+            RazorpayService(database=self._db, audit_log=self._audit_log)
+            if self._db is not None
+            else None
+        )
+
+    @property
+    def razorpay_service(self) -> Optional[RazorpayService]:
+        return self._razorpay_service
 
     @property
     def live_evaluator(self) -> Optional[LiveWindowEvaluator]:
@@ -386,11 +397,14 @@ class FinancialIncidentAPI:
 
     def handle_health(self) -> Tuple[int, Dict[str, Any]]:
         """Return system health check status."""
+        adapter = getattr(self._orchestrator.execution_engine, "adapter", None)
+        adapter_name = adapter.__class__.__name__ if adapter else ""
+        exec_mode = "razorpay_test" if adapter_name == "RazorpayExecutionAdapter" else "test_simulation"
         return 200, {
             "status": "healthy",
             "service": "merchant-finpilot-api",
             "version": "1.0.0",
-            "execution_mode": "test_simulation",
+            "execution_mode": exec_mode,
         }
 
     def handle_list_scenarios(self) -> Tuple[int, Dict[str, Any]]:
@@ -471,3 +485,20 @@ class FinancialIncidentAPI:
             return 200, response.to_dict()
         except Exception as exc:
             return 500, {"error": f"Internal error during live evaluation: {str(exc)}"}
+
+    def handle_razorpay_webhook(
+        self,
+        raw_body: bytes,
+        signature: Optional[str],
+        merchant_id: Optional[str] = None,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Validate HMAC-SHA256 signature and ingest incoming Razorpay webhook event."""
+        if self._razorpay_service is None:
+            return 503, {"error": "Razorpay service is not configured on this server."}
+
+        return self._razorpay_service.handle_webhook(
+            raw_body=raw_body,
+            signature=signature,
+            merchant_id=merchant_id,
+        )
+
