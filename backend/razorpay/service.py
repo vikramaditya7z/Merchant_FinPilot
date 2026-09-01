@@ -133,6 +133,7 @@ class RazorpayService:
 
         # If webhook contained a valid normalized payment, enrich & persist it
         enriched_payment: Optional[EnrichedPayment] = None
+        effective_merchant = merchant_id or "merchant_default"
         if result.normalized_payment is not None:
             metadata: Dict[str, Any] = {
                 "provider": "razorpay",
@@ -145,6 +146,7 @@ class RazorpayService:
                 acc = result.raw_payload.get("account_id")
                 if acc:
                     metadata["merchant_id"] = str(acc)
+                    effective_merchant = str(acc)
 
             enriched_payment = self._ingestion.enricher.enrich(
                 payment=result.normalized_payment,
@@ -153,7 +155,7 @@ class RazorpayService:
 
             # Persist to database
             if self._db is not None:
-                self._db.save_payments([enriched_payment])
+                self._db.save_payments([enriched_payment], merchant_id=effective_merchant)
 
             p = enriched_payment.payment
             # Record audit event
@@ -181,7 +183,6 @@ class RazorpayService:
         if enriched_payment is not None:
             p = enriched_payment.payment
             if p.is_failure or result.event_type == "payment.failed":
-                effective_merchant = metadata.get("merchant_id", "merchant_default")
                 event_identifier = result.event_id or f"evt_syn_{p.id}"
 
                 # Check deduplication in database
@@ -189,22 +190,6 @@ class RazorpayService:
                     self._db.get_trigger_by_event(event_identifier)
                     if self._db is not None
                     else None
-                )
-                active_merchant_jobs = (
-                    (
-                        self._db.list_triggers(
-                            merchant_id=effective_merchant,
-                            status=TriggerStatus.PROCESSING.value,
-                            limit=1,
-                        )
-                        + self._db.list_triggers(
-                            merchant_id=effective_merchant,
-                            status=TriggerStatus.QUEUED.value,
-                            limit=1,
-                        )
-                    )
-                    if self._db is not None
-                    else []
                 )
 
                 if existing_trigger is not None:
@@ -222,10 +207,6 @@ class RazorpayService:
                         attempt_count=existing_trigger["attempt_count"],
                         error_message=existing_trigger.get("error_message"),
                     )
-                elif len(active_merchant_jobs) > 0:
-                    # An active incident job is already in flight for this merchant;
-                    # telemetry is persisted to DB for the ongoing investigation without spawning redundant workers
-                    pass
                 else:
                     trigger = IncidentTrigger.create(
                         merchant_id=effective_merchant,

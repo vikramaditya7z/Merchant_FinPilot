@@ -834,6 +834,113 @@ class TestWebhookDrivenPipeline(unittest.TestCase):
         self.assertEqual(last_stopped.incident_id, trigger.incident_id)
         self.assertIn("Simulated upstream worker failure", last_stopped.payload["error"])
 
+    # -----------------------------------------------------------------------
+    # 8. Multi-Webhook Event Aggregation Regression Tests
+    # -----------------------------------------------------------------------
+
+    def test_closely_arriving_webhooks_aggregate_into_single_incident_window(self) -> None:
+        """Multiple closely arriving payment.failed webhooks are queued and aggregated into the active incident window."""
+        now_dt = datetime.now(timezone.utc)
+
+        # 1. Seed 150 baseline payments across past 7 days (4% failure rate)
+        baseline_payments = [
+            EnrichedPayment(
+                payment=Payment(
+                    id=f"pay_agg_base_{i}",
+                    amount=Money(50000),
+                    status=PaymentStatus.FAILED if i < 6 else PaymentStatus.CAPTURED,
+                    method=PaymentMethod.UPI,
+                    created_at=now_dt - timedelta(days=1, hours=i % 24, minutes=i % 60),
+                )
+            )
+            for i in range(150)
+        ]
+        self.db.save_payments(baseline_payments, merchant_id="merchant_agg_test")
+
+        # 2. Dispatch 3 closely arriving payment.failed webhooks (within last 30 seconds up to now)
+        job_ids = []
+        for i in range(3):
+            ts = int(now_dt.timestamp()) - (2 - i) * 5
+            payload = {
+                "event": "payment.failed",
+                "payload": {
+                    "payment": {
+                        "entity": {
+                            "id": f"pay_agg_fail_{i+1}",
+                            "amount": 45000,
+                            "currency": "INR",
+                            "status": "failed",
+                            "method": "upi",
+                            "error_code": "BAD_REQUEST_ERROR",
+                            "error_description": "UPI bank server timeout",
+                            "created_at": ts,
+                        }
+                    }
+                }
+            }
+            body = json.dumps(payload).encode("utf-8")
+            sig = compute_test_signature(body)
+
+            status, resp = self.rzp_service.handle_webhook(
+                raw_body=body,
+                signature=sig,
+                merchant_id="merchant_agg_test",
+            )
+            self.assertEqual(status, 200)
+            self.assertIn("job_id", resp)
+            self.assertIn("incident_id", resp)
+            self.assertEqual(resp["job_status"], "queued")
+            job_ids.append(resp["job_id"])
+
+        # 3. Wait for background worker to complete the jobs
+        deadline = time.time() + 5.0
+        target_job = job_ids[-1]
+        completed = False
+        while time.time() < deadline:
+            job = self.db.get_trigger(target_job)
+            if job and job["status"] in (TriggerStatus.COMPLETED.value, TriggerStatus.FAILED.value):
+                completed = True
+                break
+            time.sleep(0.05)
+
+        self.assertTrue(completed, "Target job must complete in background")
+
+        # 4. Verify the investigation saw all 3 failure transactions
+        final_job = self.db.get_trigger(target_job)
+        self.assertEqual(final_job["status"], TriggerStatus.COMPLETED.value)
+        pipe_res = json.loads(final_job["payload_json"])
+        scen = pipe_res["scenario_classification"]
+
+        self.assertEqual(scen["scenario_id"], "upi_failure_spike")
+        self.assertTrue(scen["is_incident"])
+        self.assertTrue(scen["is_action_eligible"])
+
+        # 5. Verify payment link creation executed
+        self.assertGreaterEqual(len(self.rzp_client.created_links), 1)
+
+    def test_separate_merchants_do_not_merge_incidents(self) -> None:
+        """Failures for different merchants remain isolated."""
+        now_dt = datetime.now(timezone.utc)
+        payload_a = {
+            "event": "payment.failed",
+            "payload": {"payment": {"entity": {"id": "pay_iso_a", "amount": 25000, "status": "failed", "method": "upi", "error_code": "GATEWAY_ERROR", "created_at": int(now_dt.timestamp())}}}
+        }
+        payload_b = {
+            "event": "payment.failed",
+            "payload": {"payment": {"entity": {"id": "pay_iso_b", "amount": 35000, "status": "failed", "method": "card", "error_code": "GATEWAY_ERROR", "created_at": int(now_dt.timestamp())}}}
+        }
+
+        body_a = json.dumps(payload_a).encode("utf-8")
+        body_b = json.dumps(payload_b).encode("utf-8")
+
+        s_a, r_a = self.rzp_service.handle_webhook(raw_body=body_a, signature=compute_test_signature(body_a), merchant_id="merchant_aaa")
+        s_b, r_b = self.rzp_service.handle_webhook(raw_body=body_b, signature=compute_test_signature(body_b), merchant_id="merchant_bbb")
+
+        self.assertEqual(s_a, 200)
+        self.assertEqual(s_b, 200)
+        self.assertNotEqual(r_a["job_id"], r_b["job_id"])
+        self.assertNotEqual(r_a["incident_id"], r_b["incident_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

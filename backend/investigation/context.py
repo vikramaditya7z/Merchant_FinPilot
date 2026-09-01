@@ -70,6 +70,10 @@ class ContextAssembler:
             FailureIncidentContext with FinancialIncident, evidence, and classification.
         """
         when = require_utc(now) if now is not None else payment.created_at
+        if now is None and self._db is not None:
+            latest_db_ts = self._db.get_latest_payment_timestamp()
+            if latest_db_ts is not None and latest_db_ts > when:
+                when = latest_db_ts
 
         # 1. Define active window (including payment timestamp)
         start_time = when - timedelta(hours=lookback_hours)
