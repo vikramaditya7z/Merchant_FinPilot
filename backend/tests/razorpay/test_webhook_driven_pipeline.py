@@ -941,6 +941,44 @@ class TestWebhookDrivenPipeline(unittest.TestCase):
         self.assertNotEqual(r_a["job_id"], r_b["job_id"])
         self.assertNotEqual(r_a["incident_id"], r_b["incident_id"])
 
+    def test_distinct_events_get_distinct_jobs_and_replays_deduplicate_with_existing_job_id(self) -> None:
+        """Distinct event IDs create distinct jobs while replay of the same event ID returns the existing job_id."""
+        now_dt = datetime.now(timezone.utc)
+        ts = int(now_dt.timestamp())
+
+        # 1. Event 1
+        p1 = {"entity": "event", "id": "evt_unique_1", "event": "payment.failed", "payload": {"payment": {"entity": {"id": "pay_u1", "amount": 50000, "status": "failed", "method": "upi", "error_code": "GATEWAY_ERROR", "created_at": ts}}}}
+        b1 = json.dumps(p1).encode("utf-8")
+        s1, r1 = self.rzp_service.handle_webhook(raw_body=b1, signature=compute_test_signature(b1), merchant_id="merchant_u")
+        self.assertEqual(s1, 200)
+        self.assertEqual(r1["status"], "processed")
+        self.assertIsNotNone(r1.get("job_id"))
+
+        # 2. Event 2 (distinct event_id)
+        p2 = {"entity": "event", "id": "evt_unique_2", "event": "payment.failed", "payload": {"payment": {"entity": {"id": "pay_u2", "amount": 50000, "status": "failed", "method": "upi", "error_code": "GATEWAY_ERROR", "created_at": ts}}}}
+        b2 = json.dumps(p2).encode("utf-8")
+        s2, r2 = self.rzp_service.handle_webhook(raw_body=b2, signature=compute_test_signature(b2), merchant_id="merchant_u")
+        self.assertEqual(s2, 200)
+        self.assertEqual(r2["status"], "processed")
+        self.assertIsNotNone(r2.get("job_id"))
+        self.assertNotEqual(r1["job_id"], r2["job_id"])
+
+        # 3. Event 3 (distinct event_id)
+        p3 = {"entity": "event", "id": "evt_unique_3", "event": "payment.failed", "payload": {"payment": {"entity": {"id": "pay_u3", "amount": 50000, "status": "failed", "method": "upi", "error_code": "GATEWAY_ERROR", "created_at": ts}}}}
+        b3 = json.dumps(p3).encode("utf-8")
+        s3, r3 = self.rzp_service.handle_webhook(raw_body=b3, signature=compute_test_signature(b3), merchant_id="merchant_u")
+        self.assertEqual(s3, 200)
+        self.assertEqual(r3["status"], "processed")
+        self.assertIsNotNone(r3.get("job_id"))
+        self.assertNotEqual(r2["job_id"], r3["job_id"])
+
+        # 4. Replay Event 1 (duplicate)
+        s1_dup, r1_dup = self.rzp_service.handle_webhook(raw_body=b1, signature=compute_test_signature(b1), merchant_id="merchant_u")
+        self.assertEqual(s1_dup, 200)
+        self.assertEqual(r1_dup["status"], "duplicate_skipped")
+        self.assertEqual(r1_dup.get("job_id"), r1["job_id"])
+        self.assertEqual(r1_dup.get("incident_id"), r1["incident_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

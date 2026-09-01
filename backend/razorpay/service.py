@@ -125,11 +125,21 @@ class RazorpayService:
             }
 
         if result.is_duplicate:
-            return 200, {
+            existing_trigger = (
+                self._db.get_trigger_by_event(result.event_id)
+                if (self._db is not None and result.event_id)
+                else None
+            )
+            dup_resp: Dict[str, Any] = {
                 "status": "duplicate_skipped",
                 "message": result.message,
                 "event_id": result.event_id,
             }
+            if existing_trigger is not None:
+                dup_resp["job_id"] = existing_trigger["job_id"]
+                dup_resp["incident_id"] = existing_trigger["incident_id"]
+                dup_resp["job_status"] = existing_trigger["status"]
+            return 200, dup_resp
 
         # If webhook contained a valid normalized payment, enrich & persist it
         enriched_payment: Optional[EnrichedPayment] = None

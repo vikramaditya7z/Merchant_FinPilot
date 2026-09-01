@@ -91,11 +91,13 @@ def main() -> int:
     job_ids = []
     for i in range(args.cluster_size):
         now_ts = int(time.time())
+        event_id = f"evt_live_test_{now_ts}_{i + 1}"
         payment_id = f"pay_live_test_{now_ts}_{i + 1}"
         order_id = f"order_live_test_{now_ts}_{i + 1}"
 
         payload_dict = {
             "entity": "event",
+            "id": event_id,
             "account_id": f"acc_{merchant_id}",
             "event": "payment.failed",
             "contains": ["payment"],
@@ -143,8 +145,9 @@ def main() -> int:
             return 1
 
         job_id = wh_res.get("job_id")
+        job_status = wh_res.get("job_status") or wh_res.get("status")
         job_ids.append(job_id)
-        print(f"  ✓ Webhook {i + 1}/{args.cluster_size} accepted: payment={payment_id} -> job={job_id} (queued)")
+        print(f"  ✓ Webhook {i + 1}/{args.cluster_size} accepted: event={event_id} payment={payment_id} -> job={job_id} ({job_status})")
         time.sleep(1)
 
     # 4. Monitor Background Pipeline Execution
