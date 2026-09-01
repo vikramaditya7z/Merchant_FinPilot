@@ -380,6 +380,45 @@ class FinancialIncidentAPI:
 
         return 200, incident_to_dict(incident)
 
+    def handle_list_incident_jobs(
+        self,
+        merchant_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Fetch recent incident triggers/jobs."""
+        if self._db is None:
+            return 200, {"jobs": [], "count": 0}
+
+        triggers = self._db.list_triggers(merchant_id=merchant_id, status=status, limit=limit)
+        jobs_list = []
+        for t in triggers:
+            item = dict(t)
+            if item.get("payload_json"):
+                try:
+                    item["pipeline_result"] = json.loads(item["payload_json"])
+                except Exception:
+                    pass
+            jobs_list.append(item)
+        return 200, {"jobs": jobs_list, "count": len(jobs_list)}
+
+    def handle_get_incident_job(self, job_id: str) -> Tuple[int, Dict[str, Any]]:
+        """Fetch a specific incident trigger/job by its job_id."""
+        if self._db is None:
+            return 500, {"error": "Database not configured."}
+
+        trigger = self._db.get_trigger(job_id.strip())
+        if trigger is None:
+            return 404, {"error": f"Job '{job_id}' not found."}
+
+        resp = dict(trigger)
+        if resp.get("payload_json"):
+            try:
+                resp["pipeline_result"] = json.loads(resp["payload_json"])
+            except Exception:
+                pass
+        return 200, resp
+
     def handle_get_audit_trail(self, incident_id: Optional[str] = None) -> Tuple[int, Dict[str, Any]]:
         """Fetch cryptographically verified audit trail records."""
         if self._audit_log is None:

@@ -50,12 +50,16 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
   } else if (
     norm === 'stopped' ||
     norm === 'escalate' ||
+    norm === 'escalated' ||
     norm === 'p1_high' ||
     norm === 'p2_medium' ||
     norm === 'warning'
   ) {
     colorClasses = 'bg-amber-950/70 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-950';
     Icon = AlertTriangle;
+  } else if (norm === 'queued' || norm === 'received') {
+    colorClasses = 'bg-cyan-950/70 text-cyan-300 border-cyan-500/40 shadow-sm shadow-cyan-950';
+    Icon = Clock;
   } else if (norm === 'skipped_duplicate' || norm === 'duplicate' || norm === 'idempotent') {
     colorClasses = 'bg-indigo-950/70 text-indigo-300 border-indigo-500/40 shadow-sm shadow-indigo-950';
     Icon = Copy;

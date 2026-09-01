@@ -174,6 +174,13 @@ export interface ProcessIncidentResponse {
   verification_result: VerificationResult | null;
   policy_decision: PolicyDecision | null;
   execution_result: ExecutionResult | null;
+  scenario_classification?: {
+    scenario_id: string;
+    confidence: number;
+    rationale: string;
+    is_incident: boolean;
+    is_action_eligible: boolean;
+  } | null;
 }
 
 export interface AuditEvent {
@@ -219,5 +226,23 @@ export interface StageExecutionTiming {
   durationMs?: number;
   status: 'waiting' | 'running' | 'completed' | 'blocked' | 'failed' | 'skipped' | 'duplicate';
   details?: string | null;
+}
+
+export interface IncidentJob {
+  job_id: string;
+  incident_id: string;
+  merchant_id: string;
+  source: string;
+  event_id: string;
+  event_type: string;
+  payment_id: string;
+  status: 'received' | 'queued' | 'processing' | 'completed' | 'failed' | 'escalated';
+  attempt_count: number;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  payload?: Record<string, any>;
+  pipeline_result?: ProcessIncidentResponse | null;
 }
 

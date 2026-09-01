@@ -6,15 +6,18 @@ import { GeminiAgentCard } from './components/dashboard/GeminiAgentCard';
 import { VerificationCard } from './components/dashboard/VerificationCard';
 import { PolicyDecisionCard } from './components/dashboard/PolicyDecisionCard';
 import { ExecutionResultCard } from './components/dashboard/ExecutionResultCard';
+import { IncidentJobsConsole } from './components/dashboard/IncidentJobsConsole';
 import { AuditTrailDrawer } from './components/audit/AuditTrailDrawer';
 import { MoneyDisplay } from './components/common/MoneyDisplay';
 import {
+  IncidentJob,
   ProcessIncidentResponse,
   ScenarioMetadata,
   StageExecutionTiming,
   StageProgressEvent,
 } from './api/types';
 import { apiClient } from './api/client';
+import { Play, Radio, X } from 'lucide-react';
 
 const FALLBACK_SCENARIOS: ScenarioMetadata[] = [
   {
@@ -127,6 +130,60 @@ const STAGE_ORDER: StageId[] = [
   'execution',
 ];
 
+const deriveStageTimings = (res: ProcessIncidentResponse | null, jobStatus?: string): {
+  timings: Record<StageId, StageExecutionTiming>;
+  finalIdx: number;
+} => {
+  if (!res) {
+    const isProcessing = jobStatus === 'processing' || jobStatus === 'queued';
+    return {
+      timings: {
+        detection: { status: isProcessing ? 'running' : 'waiting' },
+        investigation: { status: 'waiting' },
+        agent: { status: 'waiting' },
+        verification: { status: 'waiting' },
+        policy: { status: 'waiting' },
+        execution: { status: 'waiting' },
+      },
+      finalIdx: 0,
+    };
+  }
+
+  const finalStageName = (res.final_stage as StageId) || 'detection';
+  const targetIndex = STAGE_ORDER.indexOf(finalStageName);
+  const finalIdx = res.is_completed ? 5 : (targetIndex >= 0 ? targetIndex : 0);
+
+  const timings: Record<StageId, StageExecutionTiming> = {
+    detection: { status: 'waiting' },
+    investigation: { status: 'waiting' },
+    agent: { status: 'waiting' },
+    verification: { status: 'waiting' },
+    policy: { status: 'waiting' },
+    execution: { status: 'waiting' },
+  };
+
+  STAGE_ORDER.forEach((sId, idx) => {
+    if (idx < finalIdx || (idx === finalIdx && res.is_completed)) {
+      timings[sId] = {
+        status: 'completed',
+        startedAt: res.started_at,
+        completedAt: res.completed_at,
+      };
+    } else if (idx === finalIdx) {
+      timings[sId] = {
+        status: res.is_failed ? 'failed' : res.is_stopped ? 'blocked' : 'completed',
+        startedAt: res.started_at,
+        completedAt: res.completed_at,
+        details: res.stop_reason || undefined,
+      };
+    } else {
+      timings[sId] = { status: 'skipped' };
+    }
+  });
+
+  return { timings, finalIdx };
+};
+
 export const App: React.FC = () => {
   const [scenarios, setScenarios] = useState<ScenarioMetadata[]>(FALLBACK_SCENARIOS);
   const [selectedScenario, setSelectedScenario] = useState<string>('upi_failure_spike');
@@ -147,6 +204,14 @@ export const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isAuditOpen, setIsAuditOpen] = useState<boolean>(false);
 
+  // Live Incident Jobs Feed State
+  const [jobs, setJobs] = useState<IncidentJob[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [isJobsLoading, setIsJobsLoading] = useState<boolean>(false);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
+  const [consoleMode, setConsoleMode] = useState<'feed' | 'simulator'>('feed');
+
   // Active run and abort controller to prevent stale callbacks and orphaned streams
   const sessionRunIdRef = useRef<number>(0);
   const activeRunIdRef = useRef<string | null>(null);
@@ -161,9 +226,37 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Initialize scenarios
+  // Fetch Incident Jobs
+  const fetchJobs = async (silent = false) => {
+    if (!silent) setIsJobsLoading(true);
+    try {
+      const fetchedJobs = await apiClient.listIncidentJobs();
+      setJobs(fetchedJobs);
+      setLastRefreshedAt(new Date());
+      setJobsError(null);
+
+      // If a job is currently selected and still active, refresh its details
+      if (selectedJobId) {
+        const activeJobInList = fetchedJobs.find((j) => j.job_id === selectedJobId);
+        if (activeJobInList && activeJobInList.pipeline_result) {
+          setResponse(activeJobInList.pipeline_result);
+          const { timings, finalIdx } = deriveStageTimings(activeJobInList.pipeline_result, activeJobInList.status);
+          setStageTimings(timings);
+          setActiveStageIndex(finalIdx);
+        }
+      }
+    } catch (err: any) {
+      console.warn('Failed to fetch incident jobs:', err);
+      setJobsError(err.message || 'Failed to sync incident jobs');
+    } finally {
+      if (!silent) setIsJobsLoading(false);
+    }
+  };
+
+  // Initial fetch and auto-polling
   useEffect(() => {
-    const initData = async () => {
+    fetchJobs();
+    const scensInit = async () => {
       try {
         const scens = await apiClient.listScenarios();
         if (scens && scens.length > 0) {
@@ -173,8 +266,50 @@ export const App: React.FC = () => {
         console.warn('Scenarios list fetch error, using fallback:', err);
       }
     };
-    initData();
+    scensInit();
   }, []);
+
+  // Polling interval: 2.5s if active jobs exist, 10s otherwise
+  useEffect(() => {
+    const hasActiveJobs = jobs.some((j) => j.status === 'queued' || j.status === 'processing');
+    const intervalMs = hasActiveJobs ? 2500 : 10000;
+
+    const intervalId = setInterval(() => {
+      fetchJobs(true);
+    }, intervalMs);
+
+    return () => clearInterval(intervalId);
+  }, [jobs, selectedJobId]);
+
+  const handleSelectJob = async (job: IncidentJob) => {
+    setSelectedJobId(job.job_id);
+    setError(null);
+
+    if (job.pipeline_result) {
+      setResponse(job.pipeline_result);
+      const { timings, finalIdx } = deriveStageTimings(job.pipeline_result, job.status);
+      setStageTimings(timings);
+      setActiveStageIndex(finalIdx);
+    } else {
+      const { timings, finalIdx } = deriveStageTimings(null, job.status);
+      setStageTimings(timings);
+      setActiveStageIndex(finalIdx);
+    }
+
+    try {
+      const detailed = await apiClient.getIncidentJob(job.job_id);
+      if (detailed.pipeline_result) {
+        setResponse(detailed.pipeline_result);
+        const { timings, finalIdx } = deriveStageTimings(detailed.pipeline_result, detailed.status);
+        setStageTimings(timings);
+        setActiveStageIndex(finalIdx);
+      } else if (detailed.status === 'failed') {
+        setError(detailed.error_message || 'Incident job execution failed');
+      }
+    } catch (err: any) {
+      console.warn(`Failed to fetch job detail for ${job.job_id}:`, err);
+    }
+  };
 
   const handleRunPipeline = async () => {
     if (isLoading) return;
@@ -188,6 +323,7 @@ export const App: React.FC = () => {
     const currentSessionId = Date.now();
     sessionRunIdRef.current = currentSessionId;
     activeRunIdRef.current = null;
+    setSelectedJobId(null);
 
     setIsLoading(true);
     setError(null);
@@ -329,6 +465,9 @@ export const App: React.FC = () => {
       setActiveStageIndex(finalIdx);
       setResponse(finalRes);
       setIsLoading(false);
+
+      // Refresh incident jobs list so the new trigger appears in the feed
+      fetchJobs(true);
     } catch (err: any) {
       if (sessionRunIdRef.current !== currentSessionId) return;
       setIsLoading(false);
@@ -405,76 +544,149 @@ export const App: React.FC = () => {
       {/* ═══ MAIN WORKSPACE CONTAINER ═══ */}
       <main className="flex-1 max-w-[1360px] w-full mx-auto px-6 lg:px-12 py-8 space-y-8">
         
-        {/* ═══ COMMAND BAR (OPERATOR CONSOLE) ═══ */}
-        <div className="bg-[#0B1017] border border-slate-800/80 p-4 rounded-sm">
-          <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
-            
-            {/* Operator Inputs Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1">
-              <div>
-                <label className="block text-[9px] font-mono tracking-widest text-slate-500 uppercase mb-1.5 font-semibold">
-                  Merchant ID
-                </label>
-                <input
-                  type="text"
-                  value={merchantId}
-                  onChange={(e) => setMerchantId(e.target.value)}
-                  className="w-full bg-[#070A0F] border border-slate-700/60 rounded-sm px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 transition-colors"
-                  placeholder="merchant_id"
-                />
-              </div>
+        {/* ═══ CONSOLE MODE SELECTOR TABS ═══ */}
+        <div className="flex items-center gap-3 border-b border-slate-800/80 pb-3">
+          <button
+            type="button"
+            onClick={() => setConsoleMode('feed')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-sm text-xs font-mono font-bold tracking-wider uppercase transition-colors cursor-pointer ${
+              consoleMode === 'feed'
+                ? 'bg-blue-950/80 text-blue-300 border border-blue-500/50 shadow-sm shadow-blue-950'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
+            }`}
+          >
+            <Radio className="w-3.5 h-3.5 text-blue-400" />
+            <span>Live Incident Jobs Feed ({jobs.length})</span>
+          </button>
 
-              <div>
-                <label className="block text-[9px] font-mono tracking-widest text-slate-500 uppercase mb-1.5 font-semibold">
-                  Scenario Selector
-                </label>
-                <select
-                  value={selectedScenario}
-                  onChange={(e) => setSelectedScenario(e.target.value)}
-                  className="w-full bg-[#070A0F] border border-slate-700/60 rounded-sm px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer"
-                >
-                  {scenarios.map((s) => (
-                    <option key={s.scenario_id} value={s.scenario_id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[9px] font-mono tracking-widest text-slate-500 uppercase mb-1.5 font-semibold">
-                  Context Notes
-                </label>
-                <input
-                  type="text"
-                  value={contextNotes}
-                  onChange={(e) => setContextNotes(e.target.value)}
-                  className="w-full bg-[#070A0F] border border-slate-700/60 rounded-sm px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition-colors"
-                  placeholder="Operational context notes"
-                />
-              </div>
-            </div>
-
-            {/* Run Pipeline Action */}
-            <div className="flex items-center gap-4 shrink-0">
-              {response?.run_id && (
-                <div className="hidden xl:flex flex-col text-right font-mono text-[10px]">
-                  <span className="text-slate-500 uppercase">Run ID</span>
-                  <span className="text-slate-400">{response.run_id}</span>
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={handleRunPipeline}
-                disabled={isLoading || !merchantId.trim()}
-                className="h-[34px] px-6 bg-slate-100 hover:bg-white text-slate-900 text-xs font-bold uppercase tracking-widest rounded-sm transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center cursor-pointer"
-              >
-                {isLoading ? 'EXECUTING PIPELINE...' : 'RUN PIPELINE'}
-              </button>
-            </div>
-
-          </div>
+          <button
+            type="button"
+            onClick={() => setConsoleMode('simulator')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-sm text-xs font-mono font-bold tracking-wider uppercase transition-colors cursor-pointer ${
+              consoleMode === 'simulator'
+                ? 'bg-blue-950/80 text-blue-300 border border-blue-500/50 shadow-sm shadow-blue-950'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
+            }`}
+          >
+            <Play className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Synthetic Scenario Simulator</span>
+          </button>
         </div>
+
+        {/* ═══ LIVE INCIDENT JOBS FEED ═══ */}
+        {consoleMode === 'feed' && (
+          <IncidentJobsConsole
+            jobs={jobs}
+            selectedJobId={selectedJobId}
+            onSelectJob={handleSelectJob}
+            isLoading={isJobsLoading}
+            onRefresh={() => fetchJobs(false)}
+            lastRefreshedAt={lastRefreshedAt}
+            error={jobsError}
+          />
+        )}
+
+        {/* ═══ COMMAND BAR (SYNTHETIC SCENARIO SIMULATOR) ═══ */}
+        {consoleMode === 'simulator' && (
+          <div className="bg-[#0B1017] border border-slate-800/80 p-4 rounded-sm">
+            <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
+              
+              {/* Operator Inputs Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1">
+                <div>
+                  <label className="block text-[9px] font-mono tracking-widest text-slate-500 uppercase mb-1.5 font-semibold">
+                    Merchant ID
+                  </label>
+                  <input
+                    type="text"
+                    value={merchantId}
+                    onChange={(e) => setMerchantId(e.target.value)}
+                    className="w-full bg-[#070A0F] border border-slate-700/60 rounded-sm px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-blue-500 transition-colors"
+                    placeholder="merchant_id"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] font-mono tracking-widest text-slate-500 uppercase mb-1.5 font-semibold">
+                    Scenario Selector
+                  </label>
+                  <select
+                    value={selectedScenario}
+                    onChange={(e) => setSelectedScenario(e.target.value)}
+                    className="w-full bg-[#070A0F] border border-slate-700/60 rounded-sm px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer"
+                  >
+                    {scenarios.map((s) => (
+                      <option key={s.scenario_id} value={s.scenario_id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[9px] font-mono tracking-widest text-slate-500 uppercase mb-1.5 font-semibold">
+                    Context Notes
+                  </label>
+                  <input
+                    type="text"
+                    value={contextNotes}
+                    onChange={(e) => setContextNotes(e.target.value)}
+                    className="w-full bg-[#070A0F] border border-slate-700/60 rounded-sm px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition-colors"
+                    placeholder="Operational context notes"
+                  />
+                </div>
+              </div>
+
+              {/* Run Pipeline Action */}
+              <div className="flex items-center gap-4 shrink-0">
+                {response?.run_id && (
+                  <div className="hidden xl:flex flex-col text-right font-mono text-[10px]">
+                    <span className="text-slate-500 uppercase">Run ID</span>
+                    <span className="text-slate-400">{response.run_id}</span>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={handleRunPipeline}
+                  disabled={isLoading || !merchantId.trim()}
+                  className="h-[34px] px-6 bg-slate-100 hover:bg-white text-slate-900 text-xs font-bold uppercase tracking-widest rounded-sm transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center cursor-pointer"
+                >
+                  {isLoading ? 'EXECUTING PIPELINE...' : 'RUN PIPELINE'}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        )}
+
+        {/* Selected Job Active Indicator Banner */}
+        {selectedJobId && (
+          <div className="bg-[#0B1017] border border-blue-500/40 px-4 py-2.5 rounded-sm flex items-center justify-between gap-3 text-xs font-mono">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-500/50 font-bold uppercase text-[10px]">
+                Inspecting Incident Job
+              </span>
+              <span className="text-slate-200 font-bold">{selectedJobId}</span>
+              {response?.merchant_id && (
+                <span className="text-slate-400">(@{response.merchant_id})</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedJobId(null);
+                setResponse(null);
+                const { timings, finalIdx } = deriveStageTimings(null);
+                setStageTimings(timings);
+                setActiveStageIndex(finalIdx);
+              }}
+              className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-slate-200 uppercase font-semibold transition-colors cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Clear</span>
+            </button>
+          </div>
+        )}
 
         {/* Global Pipeline Error Message */}
         {error && (
@@ -505,7 +717,7 @@ export const App: React.FC = () => {
             </div>
 
             {/* Horizontal Financial Metrics Summary */}
-            <div className="flex items-center gap-8 lg:gap-12 pt-2">
+            <div className="flex items-center gap-8 lg:gap-12 pt-2 flex-wrap">
               <div>
                 <div className="text-2xl font-mono font-bold text-rose-400">
                   {failureRateStr}
@@ -515,7 +727,7 @@ export const App: React.FC = () => {
                 </div>
               </div>
 
-              <div className="w-px h-8 bg-slate-800/80" />
+              <div className="w-px h-8 bg-slate-800/80 hidden sm:block" />
 
               <div>
                 <div className="text-2xl font-mono font-bold text-slate-300">
@@ -526,7 +738,7 @@ export const App: React.FC = () => {
                 </div>
               </div>
 
-              <div className="w-px h-8 bg-slate-800/80" />
+              <div className="w-px h-8 bg-slate-800/80 hidden sm:block" />
 
               <div>
                 <div className="text-2xl font-mono font-bold text-amber-400">
@@ -537,7 +749,7 @@ export const App: React.FC = () => {
                 </div>
               </div>
 
-              <div className="w-px h-8 bg-slate-800/80" />
+              <div className="w-px h-8 bg-slate-800/80 hidden sm:block" />
 
               <div>
                 <div className="text-2xl font-mono font-bold text-rose-300">
@@ -552,7 +764,7 @@ export const App: React.FC = () => {
                 </div>
               </div>
 
-              <div className="w-px h-8 bg-slate-800/80" />
+              <div className="w-px h-8 bg-slate-800/80 hidden sm:block" />
 
               <div>
                 <div className="text-xl font-bold text-blue-300 uppercase truncate max-w-[240px]">
@@ -567,10 +779,12 @@ export const App: React.FC = () => {
         ) : (
           <div className="border-b border-slate-800/80 pb-6">
             <h1 className="text-xl font-bold tracking-tight text-slate-400 uppercase">
-              READY FOR EXECUTION
+              {selectedJobId ? 'INSPECTING INCIDENT JOB' : 'READY FOR EXECUTION'}
             </h1>
             <p className="text-xs text-slate-500 font-mono mt-1">
-              Select scenario and click 'Run Pipeline' to initiate autonomous telemetry & reasoning pipeline.
+              {selectedJobId
+                ? 'Displaying deterministic pipeline evaluation for the selected webhook trigger.'
+                : 'Select an incident job from the Live Feed above or run a synthetic scenario from the simulator.'}
             </p>
           </div>
         )}

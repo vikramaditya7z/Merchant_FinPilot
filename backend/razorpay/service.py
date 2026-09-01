@@ -7,16 +7,20 @@ enrichment, database persistence, and audit logging into FinPilot.
 """
 
 from datetime import datetime
+import json
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from ..application.contracts import PipelineResult, PipelineStatus
+from ..application.trigger import BackgroundJobDispatcher, IncidentTrigger, TriggerStatus
 from ..audit.store import AuditLog
 from ..db.database import Database
 from ..domain.canonical import short_digest
-from ..domain.enums import AuditActor, AuditEventType
+from ..domain.enums import AuditActor, AuditEventType, PolicyVerdict
 from ..domain.payment import EnrichedPayment, Payment
 from ..execution.store import ExecutionStore
 from ..ingestion.enricher import PaymentEnricher
 from ..ingestion.service import IngestionItemResult, IngestionResult, IngestionService
+from ..investigation.context import ContextAssembler
 from .client import RazorpayClient
 from .config import RazorpayConfig
 from .reconciler import RazorpayReconciler, ReconciliationReport, ReconciliationStatus
@@ -36,6 +40,9 @@ class RazorpayService:
         reconciler: Optional[RazorpayReconciler] = None,
         database: Optional[Database] = None,
         audit_log: Optional[AuditLog] = None,
+        orchestrator: Optional[Any] = None,
+        dispatcher: Optional[BackgroundJobDispatcher] = None,
+        context_assembler: Optional[ContextAssembler] = None,
     ) -> None:
         self._config = config or RazorpayConfig.from_env()
         self._client = client or RazorpayClient(config=self._config)
@@ -51,6 +58,11 @@ class RazorpayService:
             RazorpayReconciler(store=self._execution_store, audit_log=self._audit_log)
             if (self._execution_store is not None or self._audit_log is not None)
             else None
+        )
+        self._orchestrator = orchestrator
+        self._dispatcher = dispatcher
+        self._context_assembler = context_assembler or (
+            ContextAssembler(database=self._db) if self._db is not None else None
         )
 
     @property
@@ -76,6 +88,18 @@ class RazorpayService:
     @property
     def ingestion_service(self) -> IngestionService:
         return self._ingestion
+
+    @property
+    def orchestrator(self) -> Optional[Any]:
+        return self._orchestrator
+
+    @property
+    def dispatcher(self) -> Optional[BackgroundJobDispatcher]:
+        return self._dispatcher
+
+    @property
+    def context_assembler(self) -> Optional[ContextAssembler]:
+        return self._context_assembler
 
     def handle_webhook(
         self,
@@ -150,6 +174,103 @@ class RazorpayService:
                     },
                 )
 
+        # -------------------------------------------------------------
+        # Automated Incident Trigger for Payment Failures
+        # -------------------------------------------------------------
+        trigger: Optional[IncidentTrigger] = None
+        if enriched_payment is not None:
+            p = enriched_payment.payment
+            if p.is_failure or result.event_type == "payment.failed":
+                effective_merchant = metadata.get("merchant_id", "merchant_default")
+                event_identifier = result.event_id or f"evt_syn_{p.id}"
+
+                # Check deduplication in database
+                existing_trigger = (
+                    self._db.get_trigger_by_event(event_identifier)
+                    if self._db is not None
+                    else None
+                )
+                active_merchant_jobs = (
+                    (
+                        self._db.list_triggers(
+                            merchant_id=effective_merchant,
+                            status=TriggerStatus.PROCESSING.value,
+                            limit=1,
+                        )
+                        + self._db.list_triggers(
+                            merchant_id=effective_merchant,
+                            status=TriggerStatus.QUEUED.value,
+                            limit=1,
+                        )
+                    )
+                    if self._db is not None
+                    else []
+                )
+
+                if existing_trigger is not None:
+                    trigger = IncidentTrigger(
+                        job_id=existing_trigger["job_id"],
+                        incident_id=existing_trigger["incident_id"],
+                        merchant_id=existing_trigger["merchant_id"],
+                        source=existing_trigger["source"],
+                        event_id=existing_trigger["event_id"],
+                        event_type=existing_trigger["event_type"],
+                        payment_id=existing_trigger["payment_id"],
+                        status=TriggerStatus(existing_trigger["status"]),
+                        created_at=datetime.fromisoformat(existing_trigger["created_at"]),
+                        updated_at=datetime.fromisoformat(existing_trigger["updated_at"]),
+                        attempt_count=existing_trigger["attempt_count"],
+                        error_message=existing_trigger.get("error_message"),
+                    )
+                elif len(active_merchant_jobs) > 0:
+                    # An active incident job is already in flight for this merchant;
+                    # telemetry is persisted to DB for the ongoing investigation without spawning redundant workers
+                    pass
+                else:
+                    trigger = IncidentTrigger.create(
+                        merchant_id=effective_merchant,
+                        event_id=event_identifier,
+                        event_type=result.event_type or "payment.failed",
+                        payment_id=p.id,
+                        source="razorpay_webhook",
+                        payload={
+                            "amount_paise": p.amount.minor_units,
+                            "currency": p.amount.currency.value,
+                            "method": p.method.value,
+                            "error_code": p.error_code,
+                            "error_description": p.error_description,
+                        },
+                    )
+                    if self._db is not None:
+                        self._db.save_trigger(trigger.to_dict())
+
+                    if self._audit_log is not None:
+                        self._audit_log.append(
+                            actor=AuditActor.SYSTEM,
+                            event_type=AuditEventType.INCIDENT_DETECTED,
+                            summary=f"Incident {trigger.incident_id} queued for failed payment {p.id}",
+                            incident_id=trigger.incident_id,
+                            subject_id=p.id,
+                            payload={
+                                "job_id": trigger.job_id,
+                                "payment_id": p.id,
+                                "event_id": trigger.event_id,
+                            },
+                        )
+
+                    # Asynchronously dispatch pipeline
+                    if (
+                        self._dispatcher is not None
+                        and self._orchestrator is not None
+                        and self._context_assembler is not None
+                    ):
+                        self._dispatcher.submit(
+                            self._process_incident_job,
+                            trigger=trigger,
+                            payment=p,
+                            merchant_id=effective_merchant,
+                        )
+
         # Outbound Execution Reconciliation
         reconciliation_report: Optional[ReconciliationReport] = None
         if self._reconciler is not None and result.raw_payload is not None and result.event_id and result.event_type:
@@ -167,6 +288,11 @@ class RazorpayService:
             "payment_id": enriched_payment.payment.id if enriched_payment else None,
             "message": result.message,
         }
+        if trigger is not None:
+            resp_dict["job_id"] = trigger.job_id
+            resp_dict["incident_id"] = trigger.incident_id
+            resp_dict["job_status"] = trigger.status.value
+
         if reconciliation_report is not None:
             resp_dict["reconciliation"] = {
                 "status": reconciliation_report.status.value,
@@ -181,6 +307,101 @@ class RazorpayService:
             }
 
         return 200, resp_dict
+
+    def _process_incident_job(
+        self,
+        trigger: IncidentTrigger,
+        payment: Payment,
+        merchant_id: str,
+    ) -> None:
+        """Asynchronously process an incident job through context assembly and orchestration."""
+        if self._db is None or self._orchestrator is None or self._context_assembler is None:
+            return
+
+        try:
+            # 1. Transition to PROCESSING
+            self._db.update_trigger_status(
+                job_id=trigger.job_id,
+                status=TriggerStatus.PROCESSING.value,
+            )
+
+            # 2. Assemble context & classify scenario
+            ctx = self._context_assembler.assemble(
+                payment=payment,
+                merchant_id=merchant_id,
+            )
+
+            # 3. Process through orchestrator pipeline
+            result: PipelineResult = self._orchestrator.process_incident(
+                incident=ctx.incident,
+                metrics=ctx.metrics,
+                payments=ctx.recent_payments,
+                baseline_payments=ctx.baseline_payments,
+                merchant_id=merchant_id,
+            )
+
+            # 4. Serialize outcome and update status
+            completed_iso = datetime.now().astimezone().isoformat()
+            from ..api.contracts import ProcessIncidentResponse
+            pipe_dict = ProcessIncidentResponse.from_pipeline_result(result).to_dict()
+            pipe_dict["scenario_classification"] = {
+                "scenario_id": ctx.classification.scenario_id.value,
+                "confidence": ctx.classification.confidence,
+                "rationale": ctx.classification.rationale,
+                "is_incident": ctx.classification.is_incident,
+                "is_action_eligible": ctx.classification.is_action_eligible,
+            }
+            pipe_json = json.dumps(pipe_dict)
+
+            if result.status == PipelineStatus.COMPLETED:
+                self._db.update_trigger_status(
+                    job_id=trigger.job_id,
+                    status=TriggerStatus.COMPLETED.value,
+                    completed_at=completed_iso,
+                    payload_json=pipe_json,
+                )
+            elif result.status == PipelineStatus.STOPPED:
+                is_escalated = (
+                    result.policy_decision is not None
+                    and result.policy_decision.verdict == PolicyVerdict.ESCALATE
+                )
+                final_status = (
+                    TriggerStatus.ESCALATED.value
+                    if is_escalated
+                    else TriggerStatus.COMPLETED.value
+                )
+                self._db.update_trigger_status(
+                    job_id=trigger.job_id,
+                    status=final_status,
+                    completed_at=completed_iso,
+                    payload_json=pipe_json,
+                )
+            else:
+                self._db.update_trigger_status(
+                    job_id=trigger.job_id,
+                    status=TriggerStatus.FAILED.value,
+                    error_message=result.stop_reason or "Pipeline stopped",
+                    completed_at=completed_iso,
+                    payload_json=pipe_json,
+                )
+
+        except Exception as exc:
+            if self._db is not None:
+                self._db.update_trigger_status(
+                    job_id=trigger.job_id,
+                    status=TriggerStatus.FAILED.value,
+                    error_message=str(exc),
+                    completed_at=datetime.now().astimezone().isoformat(),
+                )
+            if self._audit_log is not None:
+                self._audit_log.append(
+                    actor=AuditActor.SYSTEM,
+                    event_type=AuditEventType.PIPELINE_STOPPED,
+                    summary=f"Incident job {trigger.job_id} failed: {str(exc)}",
+                    incident_id=trigger.incident_id,
+                    subject_id=trigger.payment_id,
+                    payload={"job_id": trigger.job_id, "error": str(exc)},
+                )
 
     def sync_recent_payments(
         self,

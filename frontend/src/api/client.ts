@@ -1,6 +1,7 @@
 import {
   AuditTrailResponse,
   HealthResponse,
+  IncidentJob,
   ProcessIncidentResponse,
   ScenarioMetadata,
   StageProgressEvent,
@@ -169,6 +170,21 @@ export class FinPilotApiClient {
   async getIncident(incidentId: string): Promise<Record<string, any>> {
     const res = await fetch(`${API_BASE}/incidents/${encodeURIComponent(incidentId)}`);
     return parseResponse(res, `Failed to get incident ${incidentId}`);
+  }
+
+  async listIncidentJobs(merchantId?: string, status?: string): Promise<IncidentJob[]> {
+    const params = new URLSearchParams();
+    if (merchantId) params.append('merchant_id', merchantId);
+    if (status) params.append('status', status);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${API_BASE}/incidents/jobs${qs}`);
+    const data = await parseResponse<{ jobs: IncidentJob[] }>(res, 'Failed to fetch incident jobs');
+    return data.jobs || [];
+  }
+
+  async getIncidentJob(jobId: string): Promise<IncidentJob> {
+    const res = await fetch(`${API_BASE}/incidents/jobs/${encodeURIComponent(jobId)}`);
+    return parseResponse<IncidentJob>(res, `Failed to fetch incident job ${jobId}`);
   }
 
   async getAuditTrail(incidentId?: string): Promise<AuditTrailResponse> {

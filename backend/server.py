@@ -20,6 +20,7 @@ from .agent.provider import GeminiProvider, LLMProvider, MockLLMProvider
 from .api.app import FinPilotASGIApp, FinPilotApp, create_app
 from .api.router import FinancialIncidentAPI
 from .application.orchestrator import FinancialIncidentOrchestrator
+from .application.trigger import BackgroundJobDispatcher
 from .audit.store import AuditLog
 from .db.database import Database
 from .detection.detector import Detector
@@ -98,6 +99,8 @@ def create_default_mock_handler(
         target_type = TargetEntityType.MERCHANT.value
         action = IntentAction.NOTIFY_MERCHANT.value
         reason = "Automated notification warranted by detected financial degradation over historical baseline."
+        parameters: Dict[str, Any] = {"channels": "email,webhook"}
+        claimed_amount_paise: Optional[int] = None
 
         if inc_id and db is not None:
             inc = db.get_incident(inc_id)
@@ -105,6 +108,23 @@ def create_default_mock_handler(
                 target_id = inc.merchant_id or "test_merchant"
                 if inc.evidence:
                     ev_refs = [e.evidence_id for e in inc.evidence]
+                    for ev in inc.evidence:
+                        if "Payment pay_" in ev.summary or "failed with code" in ev.summary:
+                            for word in ev.summary.split():
+                                if word.startswith("pay_"):
+                                    clean_pay_id = word.strip(":,.;()")
+                                    p = db.get_payment(clean_pay_id)
+                                    if p is not None and p.is_failure:
+                                        action = IntentAction.CREATE_PAYMENT_LINK.value
+                                        target_type = TargetEntityType.PAYMENT.value
+                                        target_id = p.id
+                                        claimed_amount_paise = p.amount.minor_units
+                                        parameters = {
+                                            "amount": p.amount.minor_units,
+                                            "currency": p.amount.currency.value,
+                                        }
+                                        reason = f"Automated recovery link warranted for failed payment {p.id} ({p.method.value})."
+                                        break
 
         response_payload = {
             "reasoning": (
@@ -132,7 +152,8 @@ def create_default_mock_handler(
                 "target_id": target_id,
                 "reason": reason,
                 "evidence_refs": ev_refs,
-                "parameters": {"channels": "email,webhook"},
+                "parameters": parameters,
+                "claimed_amount_paise": claimed_amount_paise,
                 "confidence": "0.95",
             },
         }
@@ -250,11 +271,19 @@ def build_app(
         audit_log=alog,
     )
 
+    dispatcher = BackgroundJobDispatcher(max_workers=4)
+
     rzp_service = razorpay_service or RazorpayService(
         database=db,
         audit_log=alog,
         execution_store=exec_store,
+        orchestrator=orchestrator,
+        dispatcher=dispatcher,
     )
+    if rzp_service.orchestrator is None:
+        rzp_service._orchestrator = orchestrator
+    if rzp_service.dispatcher is None:
+        rzp_service._dispatcher = dispatcher
 
     api = FinancialIncidentAPI(
         orchestrator=orchestrator,

@@ -152,6 +152,24 @@ class FinPilotApp:
             )
             return self._send_json(start_response, status_code, body)
 
+        # 3e. Incident Jobs (List and Get)
+        if method == "GET" and path == "/api/v1/incidents/jobs":
+            query_string = environ.get("QUERY_STRING", "")
+            params = parse_qs(query_string)
+            merchant_id = params.get("merchant_id", [None])[0]
+            status = params.get("status", [None])[0]
+            limit_str = params.get("limit", ["50"])[0]
+            limit = int(limit_str) if limit_str.isdigit() else 50
+            status_code, body = self._api.handle_list_incident_jobs(merchant_id=merchant_id, status=status, limit=limit)
+            return self._send_json(start_response, status_code, body)
+
+        if method == "GET" and path.startswith("/api/v1/incidents/jobs/"):
+            job_id = path.split("/api/v1/incidents/jobs/", 1)[1].strip()
+            if not job_id:
+                return self._send_json(start_response, 400, {"error": "Missing job_id"})
+            status_code, body = self._api.handle_get_incident_job(job_id)
+            return self._send_json(start_response, status_code, body)
+
         # 4. Get Incident by ID
         if method == "GET" and path.startswith("/api/v1/incidents/"):
             incident_id = path.split("/api/v1/incidents/", 1)[1].strip()
@@ -362,6 +380,27 @@ class FinPilotASGIApp:
                 signature=signature,
                 merchant_id=merchant_id,
             )
+            await self._send_json(send, status_code, body)
+            return
+
+        # 3e. Incident Jobs (List and Get)
+        if method == "GET" and path == "/api/v1/incidents/jobs":
+            query_string = scope.get("query_string", b"").decode("utf-8")
+            params = parse_qs(query_string)
+            merchant_id = params.get("merchant_id", [None])[0]
+            status = params.get("status", [None])[0]
+            limit_str = params.get("limit", ["50"])[0]
+            limit = int(limit_str) if limit_str.isdigit() else 50
+            status_code, body = self._api.handle_list_incident_jobs(merchant_id=merchant_id, status=status, limit=limit)
+            await self._send_json(send, status_code, body)
+            return
+
+        if method == "GET" and path.startswith("/api/v1/incidents/jobs/"):
+            job_id = path.split("/api/v1/incidents/jobs/", 1)[1].strip()
+            if not job_id:
+                await self._send_json(send, 400, {"error": "Missing job_id"})
+                return
+            status_code, body = self._api.handle_get_incident_job(job_id)
             await self._send_json(send, status_code, body)
             return
 

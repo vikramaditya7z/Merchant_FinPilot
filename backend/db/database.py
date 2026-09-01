@@ -7,18 +7,22 @@ Provides typed persistence for domain contracts:
 - FinancialIncidents and FinancialEvidence
 - InvestigationReports
 - AuditEvents
+- IncidentTriggers (Webhook-driven job queue)
 
 Invariants:
 - All monetary values stored as INTEGER minor units (paise).
 - Timestamps preserved as ISO-8601 UTC.
 - Enums converted to/from strings cleanly.
 - Re-hydrated records are validated through their domain constructors.
+- Thread-safe concurrency protected via RLock.
 """
 
+import functools
 import json
 import sqlite3
+import threading
 from datetime import datetime
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..domain.audit import AuditEvent
 from ..domain.enums import (
@@ -52,11 +56,21 @@ from .serde import (
 )
 
 
+def synchronized(method: Any) -> Any:
+    """Decorator ensuring thread-safe access to SQLite connection."""
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Database:
     """Lightweight, typed SQLite repository for FinPilot domain entities."""
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(
             db_path,
             check_same_thread=False,
@@ -65,6 +79,7 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._init_db()
 
+    @synchronized
     def _init_db(self) -> None:
         with self._conn:
             self._conn.execute("PRAGMA foreign_keys = ON;")
@@ -72,6 +87,7 @@ class Database:
                 self._conn.execute("PRAGMA journal_mode = WAL;")
             self._conn.executescript(SCHEMA_DDL)
 
+    @synchronized
     def close(self) -> None:
         self._conn.close()
 
@@ -85,10 +101,14 @@ class Database:
     # Payments repository
     # -----------------------------------------------------------------------
 
+    @synchronized
     def save_payment(
         self,
         item: PaymentLike,
         enrichment: Optional[PaymentEnrichment] = None,
+        merchant_id: Optional[str] = None,
+        customer_contact: Optional[str] = None,
+        customer_email: Optional[str] = None,
     ) -> None:
         """Save a single payment and its optional enrichment."""
         payment = as_payment(item)
@@ -103,8 +123,9 @@ class Database:
             id, order_id, amount_paise, currency, status, method,
             created_at, error_code, error_description, error_source,
             error_step, error_reason,
-            region, provider, failure_category, source_confidence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            region, provider, failure_category, source_confidence,
+            merchant_id, customer_contact, customer_email
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         params = (
@@ -124,12 +145,20 @@ class Database:
             enr.provider if enr else None,
             enr.failure_category.value if (enr and enr.failure_category) else None,
             enr.source_confidence.value if enr else None,
+            merchant_id,
+            customer_contact,
+            customer_email,
         )
 
         with self._conn:
             self._conn.execute(query, params)
 
-    def save_payments(self, items: Sequence[PaymentLike]) -> None:
+    @synchronized
+    def save_payments(
+        self,
+        items: Sequence[PaymentLike],
+        merchant_id: Optional[str] = None,
+    ) -> None:
         """Batch save multiple payments."""
         if not items:
             return
@@ -138,8 +167,9 @@ class Database:
             id, order_id, amount_paise, currency, status, method,
             created_at, error_code, error_description, error_source,
             error_step, error_reason,
-            region, provider, failure_category, source_confidence
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            region, provider, failure_category, source_confidence,
+            merchant_id, customer_contact, customer_email
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         param_list = []
@@ -168,6 +198,9 @@ class Database:
                     enr.provider if enr else None,
                     enr.failure_category.value if (enr and enr.failure_category) else None,
                     enr.source_confidence.value if enr else None,
+                    merchant_id,
+                    None,
+                    None,
                 )
             )
 
@@ -200,6 +233,7 @@ class Database:
 
         return EnrichedPayment(payment=p, enrichment=enr)
 
+    @synchronized
     def get_payment(self, payment_id: str) -> Optional[Payment]:
         """Retrieve a Payment by ID."""
         row = self._conn.execute(
@@ -209,6 +243,7 @@ class Database:
             return None
         return self._row_to_enriched_payment(row).payment
 
+    @synchronized
     def get_enriched_payment(self, payment_id: str) -> Optional[EnrichedPayment]:
         """Retrieve an EnrichedPayment by ID."""
         row = self._conn.execute(
@@ -218,6 +253,7 @@ class Database:
             return None
         return self._row_to_enriched_payment(row)
 
+    @synchronized
     def list_payments(
         self,
         window: Optional[TimeWindow] = None,
@@ -254,6 +290,7 @@ class Database:
         rows = self._conn.execute(sql, params).fetchall()
         return tuple(self._row_to_enriched_payment(r) for r in rows)
 
+    @synchronized
     def get_latest_payment_timestamp(self) -> Optional[datetime]:
         """Return the UTC created_at timestamp of the newest payment, or None."""
         row = self._conn.execute(
@@ -263,6 +300,7 @@ class Database:
             return None
         return datetime.fromisoformat(row["created_at"])
 
+    @synchronized
     def list_payments_in_window(self, window: TimeWindow) -> Tuple[EnrichedPayment, ...]:
         """List all enriched payments whose created_at falls in [window.start, window.end)."""
         return self.list_payments(window=window)
@@ -271,6 +309,7 @@ class Database:
     # Incidents & Evidence repository
     # -----------------------------------------------------------------------
 
+    @synchronized
     def save_incident(self, incident: FinancialIncident) -> None:
         """Save a FinancialIncident and all attached FinancialEvidence."""
         if not isinstance(incident, FinancialIncident):
@@ -304,6 +343,7 @@ class Database:
             for ev in incident.evidence:
                 self.save_evidence(ev)
 
+    @synchronized
     def save_evidence(self, evidence: FinancialEvidence) -> None:
         """Save an individual piece of FinancialEvidence."""
         if not isinstance(evidence, FinancialEvidence):
@@ -333,6 +373,7 @@ class Database:
         with self._conn:
             self._conn.execute(query, params)
 
+    @synchronized
     def get_evidence(self, evidence_id: str) -> Optional[FinancialEvidence]:
         """Retrieve a single FinancialEvidence record by ID."""
         row = self._conn.execute(
@@ -342,6 +383,7 @@ class Database:
             return None
         return dict_to_evidence(dict(row))
 
+    @synchronized
     def list_evidence(self, incident_id: str) -> Tuple[FinancialEvidence, ...]:
         """List all evidence attached to an incident."""
         rows = self._conn.execute(
@@ -350,6 +392,7 @@ class Database:
         ).fetchall()
         return tuple(dict_to_evidence(dict(r)) for r in rows)
 
+    @synchronized
     def get_incident(self, incident_id: str) -> Optional[FinancialIncident]:
         """Retrieve a FinancialIncident by ID."""
         row = self._conn.execute(
@@ -359,6 +402,7 @@ class Database:
             return None
         return self._row_to_incident(row)
 
+    @synchronized
     def get_incident_by_key(self, incident_key: str) -> Optional[FinancialIncident]:
         """Retrieve a FinancialIncident by its deduplication idempotency key."""
         row = self._conn.execute(
@@ -368,6 +412,7 @@ class Database:
             return None
         return self._row_to_incident(row)
 
+    @synchronized
     def list_incidents(
         self,
         merchant_id: Optional[str] = None,
@@ -421,6 +466,7 @@ class Database:
     # Investigations repository
     # -----------------------------------------------------------------------
 
+    @synchronized
     def save_investigation(self, report: InvestigationReport) -> None:
         """Save an InvestigationReport."""
         if not isinstance(report, InvestigationReport):
@@ -448,6 +494,7 @@ class Database:
         with self._conn:
             self._conn.execute(query, params)
 
+    @synchronized
     def get_investigation(self, incident_id: str) -> Optional[InvestigationReport]:
         """Retrieve an InvestigationReport by incident ID."""
         row = self._conn.execute(
@@ -462,6 +509,7 @@ class Database:
     # Audit Events repository
     # -----------------------------------------------------------------------
 
+    @synchronized
     def save_audit_event(self, event: AuditEvent) -> None:
         """Save an AuditEvent to the persistent log."""
         if not isinstance(event, AuditEvent):
@@ -490,6 +538,7 @@ class Database:
         with self._conn:
             self._conn.execute(query, params)
 
+    @synchronized
     def get_audit_event(self, event_id: str) -> Optional[AuditEvent]:
         """Retrieve a single AuditEvent by ID."""
         row = self._conn.execute(
@@ -499,6 +548,7 @@ class Database:
             return None
         return self._row_to_audit_event(row)
 
+    @synchronized
     def list_audit_events(
         self,
         incident_id: Optional[str] = None,
@@ -531,6 +581,7 @@ class Database:
         rows = self._conn.execute(sql, params).fetchall()
         return tuple(self._row_to_audit_event(r) for r in rows)
 
+    @synchronized
     def get_max_audit_sequence(self) -> int:
         """Get the highest recorded audit sequence number, or 0 if empty."""
         row = self._conn.execute(
@@ -551,3 +602,116 @@ class Database:
             payload=json.loads(row["payload_json"]),
             payload_digest=row["payload_digest"],
         )
+
+    # -----------------------------------------------------------------------
+    # Incident Triggers / Jobs repository
+    # -----------------------------------------------------------------------
+
+    @synchronized
+    def save_trigger(self, trigger_dict: Mapping[str, Any]) -> None:
+        """Insert or replace an incident trigger job."""
+        query = """
+        INSERT OR REPLACE INTO incident_triggers (
+            job_id, incident_id, merchant_id, source, event_id,
+            event_type, payment_id, status, attempt_count,
+            error_message, created_at, updated_at, completed_at, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            trigger_dict["job_id"],
+            trigger_dict["incident_id"],
+            trigger_dict["merchant_id"],
+            trigger_dict["source"],
+            trigger_dict["event_id"],
+            trigger_dict["event_type"],
+            trigger_dict["payment_id"],
+            trigger_dict["status"],
+            trigger_dict.get("attempt_count", 0),
+            trigger_dict.get("error_message"),
+            trigger_dict["created_at"],
+            trigger_dict["updated_at"],
+            trigger_dict.get("completed_at"),
+            trigger_dict.get("payload_json"),
+        )
+        with self._conn:
+            self._conn.execute(query, params)
+
+    @synchronized
+    def get_trigger(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an incident trigger by job_id."""
+        row = self._conn.execute(
+            "SELECT * FROM incident_triggers WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def get_trigger_by_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an incident trigger by Razorpay event_id."""
+        row = self._conn.execute(
+            "SELECT * FROM incident_triggers WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def get_trigger_by_incident(self, incident_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an incident trigger by FinPilot incident_id."""
+        row = self._conn.execute(
+            "SELECT * FROM incident_triggers WHERE incident_id = ?", (incident_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def update_trigger_status(
+        self,
+        job_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        payload_json: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> None:
+        """Update processing status and error info on a trigger."""
+        clauses = ["status = ?", "updated_at = ?"]
+        now_iso = updated_at or datetime.now().astimezone().isoformat()
+        params: List[Any] = [status, now_iso]
+
+        if error_message is not None:
+            clauses.append("error_message = ?")
+            params.append(error_message)
+        if completed_at is not None:
+            clauses.append("completed_at = ?")
+            params.append(completed_at)
+        if payload_json is not None:
+            clauses.append("payload_json = ?")
+            params.append(payload_json)
+
+        params.append(job_id)
+        sql = f"UPDATE incident_triggers SET {', '.join(clauses)} WHERE job_id = ?"
+        with self._conn:
+            self._conn.execute(sql, params)
+
+    @synchronized
+    def list_triggers(
+        self,
+        merchant_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List recent incident triggers."""
+        clauses = []
+        params: List[Any] = []
+        if merchant_id:
+            clauses.append("merchant_id = ?")
+            params.append(merchant_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+
+        sql = "SELECT * FROM incident_triggers"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]

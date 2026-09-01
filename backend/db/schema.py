@@ -27,13 +27,17 @@ CREATE TABLE IF NOT EXISTS payments (
     region TEXT,
     provider TEXT,
     failure_category TEXT,
-    source_confidence TEXT
+    source_confidence TEXT,
+    merchant_id TEXT,
+    customer_contact TEXT,
+    customer_email TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method);
 CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
+CREATE INDEX IF NOT EXISTS idx_payments_merchant_id ON payments(merchant_id);
 
 -- Incidents table
 CREATE TABLE IF NOT EXISTS incidents (
@@ -102,4 +106,27 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_audit_sequence ON audit_events(sequence);
 CREATE INDEX IF NOT EXISTS idx_audit_incident ON audit_events(incident_id);
 CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_events(event_type);
+
+-- Incident Triggers table (Durable job tracking for webhook events)
+CREATE TABLE IF NOT EXISTS incident_triggers (
+    job_id TEXT PRIMARY KEY,
+    incident_id TEXT NOT NULL,
+    merchant_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payment_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    payload_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_triggers_status ON incident_triggers(status);
+CREATE INDEX IF NOT EXISTS idx_triggers_event ON incident_triggers(event_id);
+CREATE INDEX IF NOT EXISTS idx_triggers_incident ON incident_triggers(incident_id);
+CREATE INDEX IF NOT EXISTS idx_triggers_merchant ON incident_triggers(merchant_id);
 """
