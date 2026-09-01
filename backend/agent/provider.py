@@ -10,6 +10,7 @@ Provides:
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -209,24 +210,42 @@ class GeminiProvider(LLMProvider):
             method="POST",
         )
 
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout_seconds) as response:
-                resp_bytes = response.read()
-                resp_json = json.loads(resp_bytes.decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            raw_err = e.read().decode("utf-8", errors="replace")
-            err_body = self._sanitize(raw_err)
-            if e.code == 429:
-                raise LLMRateLimitError(f"Gemini API rate limit exceeded: {err_body}") from e
-            elif e.code in (401, 403):
-                raise LLMAuthenticationError(f"Gemini API authentication failed: {err_body}") from e
-            raise LLMProviderError(f"Gemini API HTTP error {e.code}: {err_body}") from e
-        except urllib.error.URLError as e:
-            raise LLMProviderError(f"Gemini API network connection error: {self._sanitize(str(e.reason))}") from e
-        except Exception as e:
-            raise LLMProviderError(f"Unexpected error communicating with Gemini API: {self._sanitize(str(e))}") from e
-
-        return self._parse_gemini_response(resp_json)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout_seconds) as response:
+                    resp_bytes = response.read()
+                    resp_json = json.loads(resp_bytes.decode("utf-8"))
+                    return self._parse_gemini_response(resp_json)
+            except urllib.error.HTTPError as e:
+                raw_err = e.read().decode("utf-8", errors="replace")
+                err_body = self._sanitize(raw_err)
+                if e.code == 429 and attempt < max_retries - 1:
+                    retry_delay = 5.0 * (attempt + 1)
+                    try:
+                        err_json = json.loads(raw_err)
+                        details = err_json.get("error", {}).get("details", [])
+                        for d in details:
+                            if "retryDelay" in d:
+                                delay_str = d["retryDelay"].rstrip("s")
+                                retry_delay = max(float(delay_str) + 1.0, 3.0)
+                                break
+                    except Exception:
+                        pass
+                    time.sleep(retry_delay)
+                    continue
+                elif e.code == 429:
+                    raise LLMRateLimitError(f"Gemini API rate limit exceeded: {err_body}") from e
+                elif e.code in (401, 403):
+                    raise LLMAuthenticationError(f"Gemini API authentication failed: {err_body}") from e
+                raise LLMProviderError(f"Gemini API HTTP error {e.code}: {err_body}") from e
+            except urllib.error.URLError as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                raise LLMProviderError(f"Gemini API network connection error: {self._sanitize(str(e.reason))}") from e
+            except Exception as e:
+                raise LLMProviderError(f"Unexpected error communicating with Gemini API: {self._sanitize(str(e))}") from e
 
     def _sanitize(self, text: str) -> str:
         """Sanitize text to guarantee API key is never exposed."""

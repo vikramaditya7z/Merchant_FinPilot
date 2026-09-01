@@ -669,12 +669,16 @@ class Database:
         completed_at: Optional[str] = None,
         payload_json: Optional[str] = None,
         updated_at: Optional[str] = None,
+        incident_id: Optional[str] = None,
     ) -> None:
         """Update processing status and error info on a trigger."""
         clauses = ["status = ?", "updated_at = ?"]
         now_iso = updated_at or datetime.now().astimezone().isoformat()
         params: List[Any] = [status, now_iso]
 
+        if incident_id is not None:
+            clauses.append("incident_id = ?")
+            params.append(incident_id)
         if error_message is not None:
             clauses.append("error_message = ?")
             params.append(error_message)

@@ -8,6 +8,7 @@ enrichment, database persistence, and audit logging into FinPilot.
 
 from datetime import datetime
 import json
+import threading
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..application.contracts import PipelineResult, PipelineStatus
@@ -64,6 +65,14 @@ class RazorpayService:
         self._context_assembler = context_assembler or (
             ContextAssembler(database=self._db) if self._db is not None else None
         )
+        self._merchant_locks: Dict[str, threading.Lock] = {}
+        self._locks_mutex = threading.Lock()
+
+    def _get_merchant_lock(self, merchant_id: str) -> threading.Lock:
+        with self._locks_mutex:
+            if merchant_id not in self._merchant_locks:
+                self._merchant_locks[merchant_id] = threading.Lock()
+            return self._merchant_locks[merchant_id]
 
     @property
     def reconciler(self) -> Optional[RazorpayReconciler]:
@@ -309,90 +318,96 @@ class RazorpayService:
         if self._db is None or self._orchestrator is None or self._context_assembler is None:
             return
 
-        try:
-            # 1. Transition to PROCESSING
-            self._db.update_trigger_status(
-                job_id=trigger.job_id,
-                status=TriggerStatus.PROCESSING.value,
-            )
-
-            # 2. Assemble context & classify scenario
-            ctx = self._context_assembler.assemble(
-                payment=payment,
-                merchant_id=merchant_id,
-            )
-
-            # 3. Process through orchestrator pipeline
-            result: PipelineResult = self._orchestrator.process_incident(
-                incident=ctx.incident,
-                metrics=ctx.metrics,
-                payments=ctx.recent_payments,
-                baseline_payments=ctx.baseline_payments,
-                merchant_id=merchant_id,
-            )
-
-            # 4. Serialize outcome and update status
-            completed_iso = datetime.now().astimezone().isoformat()
-            from ..api.contracts import ProcessIncidentResponse
-            pipe_dict = ProcessIncidentResponse.from_pipeline_result(result).to_dict()
-            pipe_dict["scenario_classification"] = {
-                "scenario_id": ctx.classification.scenario_id.value,
-                "confidence": ctx.classification.confidence,
-                "rationale": ctx.classification.rationale,
-                "is_incident": ctx.classification.is_incident,
-                "is_action_eligible": ctx.classification.is_action_eligible,
-            }
-            pipe_json = json.dumps(pipe_dict)
-
-            if result.status == PipelineStatus.COMPLETED:
+        with self._get_merchant_lock(merchant_id):
+            try:
+                # 1. Transition to PROCESSING
                 self._db.update_trigger_status(
                     job_id=trigger.job_id,
-                    status=TriggerStatus.COMPLETED.value,
-                    completed_at=completed_iso,
-                    payload_json=pipe_json,
-                )
-            elif result.status == PipelineStatus.STOPPED:
-                is_escalated = (
-                    result.policy_decision is not None
-                    and result.policy_decision.verdict == PolicyVerdict.ESCALATE
-                )
-                final_status = (
-                    TriggerStatus.ESCALATED.value
-                    if is_escalated
-                    else TriggerStatus.COMPLETED.value
-                )
-                self._db.update_trigger_status(
-                    job_id=trigger.job_id,
-                    status=final_status,
-                    completed_at=completed_iso,
-                    payload_json=pipe_json,
-                )
-            else:
-                self._db.update_trigger_status(
-                    job_id=trigger.job_id,
-                    status=TriggerStatus.FAILED.value,
-                    error_message=result.stop_reason or "Pipeline stopped",
-                    completed_at=completed_iso,
-                    payload_json=pipe_json,
+                    status=TriggerStatus.PROCESSING.value,
                 )
 
-        except Exception as exc:
-            if self._db is not None:
-                self._db.update_trigger_status(
-                    job_id=trigger.job_id,
-                    status=TriggerStatus.FAILED.value,
-                    error_message=str(exc),
-                    completed_at=datetime.now().astimezone().isoformat(),
+                # 2. Assemble context & classify scenario
+                ctx = self._context_assembler.assemble(
+                    payment=payment,
+                    merchant_id=merchant_id,
                 )
-            if self._audit_log is not None:
-                self._audit_log.append(
-                    actor=AuditActor.SYSTEM,
-                    event_type=AuditEventType.PIPELINE_STOPPED,
-                    summary=f"Incident job {trigger.job_id} failed: {str(exc)}",
-                    incident_id=trigger.incident_id,
-                    subject_id=trigger.payment_id,
-                    payload={"job_id": trigger.job_id, "error": str(exc)},
+
+                canonical_inc_id = ctx.incident.incident_id if ctx.incident else trigger.incident_id
+
+                # 3. Process through orchestrator pipeline
+                result: PipelineResult = self._orchestrator.process_incident(
+                    incident=ctx.incident,
+                    metrics=ctx.metrics,
+                    payments=ctx.recent_payments,
+                    baseline_payments=ctx.baseline_payments,
+                    merchant_id=merchant_id,
                 )
+
+                # 4. Serialize outcome and update status
+                completed_iso = datetime.now().astimezone().isoformat()
+                from ..api.contracts import ProcessIncidentResponse
+                pipe_dict = ProcessIncidentResponse.from_pipeline_result(result).to_dict()
+                pipe_dict["scenario_classification"] = {
+                    "scenario_id": ctx.classification.scenario_id.value,
+                    "confidence": ctx.classification.confidence,
+                    "rationale": ctx.classification.rationale,
+                    "is_incident": ctx.classification.is_incident,
+                    "is_action_eligible": ctx.classification.is_action_eligible,
+                }
+                pipe_json = json.dumps(pipe_dict)
+
+                if result.status == PipelineStatus.COMPLETED:
+                    self._db.update_trigger_status(
+                        job_id=trigger.job_id,
+                        status=TriggerStatus.COMPLETED.value,
+                        completed_at=completed_iso,
+                        payload_json=pipe_json,
+                        incident_id=canonical_inc_id,
+                    )
+                elif result.status == PipelineStatus.STOPPED:
+                    is_escalated = (
+                        result.policy_decision is not None
+                        and result.policy_decision.verdict == PolicyVerdict.ESCALATE
+                    )
+                    final_status = (
+                        TriggerStatus.ESCALATED.value
+                        if is_escalated
+                        else TriggerStatus.COMPLETED.value
+                    )
+                    self._db.update_trigger_status(
+                        job_id=trigger.job_id,
+                        status=final_status,
+                        completed_at=completed_iso,
+                        payload_json=pipe_json,
+                        incident_id=canonical_inc_id,
+                    )
+                else:
+                    self._db.update_trigger_status(
+                        job_id=trigger.job_id,
+                        status=TriggerStatus.FAILED.value,
+                        error_message=result.stop_reason or "Pipeline stopped",
+                        completed_at=completed_iso,
+                        payload_json=pipe_json,
+                        incident_id=canonical_inc_id,
+                    )
+
+            except Exception as exc:
+                if self._db is not None:
+                    self._db.update_trigger_status(
+                        job_id=trigger.job_id,
+                        status=TriggerStatus.FAILED.value,
+                        error_message=str(exc),
+                        completed_at=datetime.now().astimezone().isoformat(),
+                    )
+                if self._audit_log is not None:
+                    self._audit_log.append(
+                        actor=AuditActor.SYSTEM,
+                        event_type=AuditEventType.PIPELINE_STOPPED,
+                        summary=f"Incident job {trigger.job_id} failed: {str(exc)}",
+                        incident_id=trigger.incident_id,
+                        subject_id=trigger.payment_id,
+                        payload={"job_id": trigger.job_id, "error": str(exc)},
+                    )
 
     def sync_recent_payments(
         self,

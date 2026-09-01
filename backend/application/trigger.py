@@ -76,16 +76,17 @@ class IncidentTrigger:
         payment_id: str,
         source: str = "razorpay_webhook",
         now: Optional[datetime] = None,
+        incident_id: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> "IncidentTrigger":
         """Factory creating a new QUEUED IncidentTrigger."""
         when = require_utc(now) if now is not None else datetime.now().astimezone()
         job_id = f"job_{short_digest({'evt': event_id, 'pay': payment_id, 'm': merchant_id})}"
-        incident_id = f"inc_{short_digest({'job': job_id, 'when': when.isoformat()})}"
+        inc_id = incident_id or f"inc_{short_digest({'m': merchant_id, 'w': when.strftime('%Y%m%d%H')})}"
 
         return cls(
             job_id=job_id,
-            incident_id=incident_id,
+            incident_id=inc_id,
             merchant_id=merchant_id,
             source=source,
             event_id=event_id,
