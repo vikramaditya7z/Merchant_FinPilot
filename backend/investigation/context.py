@@ -24,7 +24,7 @@ from ..domain.incident import FinancialEvidence, FinancialIncident
 from ..domain.metrics import FinancialMetrics
 from ..domain.payment import EnrichedPayment, Payment
 from ..domain.window import UTC, TimeWindow, require_utc
-from ..financial.engine import compute_metrics
+from ..financial.engine import build_hourly_baseline, compute_metrics
 from .classifier import ScenarioClassification, ScenarioClassifier
 
 
@@ -96,10 +96,20 @@ class ContextAssembler:
         baseline_payments = tuple(baseline_raw)
 
         # 4. Compute deterministic financial metrics for the window
+        baseline_buckets = (
+            build_hourly_baseline(
+                baseline_payments,
+                current_window,
+                lookback_windows=7 * 24,
+            )
+            if baseline_payments
+            else None
+        )
         metrics = compute_metrics(
             items=recent_payments,
             window=current_window,
             now=when,
+            baseline_windows=baseline_buckets,
         )
 
         # 5. Classify scenario

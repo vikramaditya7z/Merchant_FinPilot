@@ -357,5 +357,143 @@ class ScenarioInvestigationTests(unittest.TestCase):
             self.assertEqual(ev1.summary, ev2.summary)
 
 
+class ContextAssemblerUnitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from ...db.database import Database
+        from ...investigation.context import ContextAssembler
+        self.db = Database(":memory:")
+        self.assembler = ContextAssembler(database=self.db)
+
+    def test_context_assembler_passes_baseline_windows_and_calculates_baseline_metrics(self) -> None:
+        """When sufficient historical baseline (>=100) exists, baseline metrics are calculated."""
+        from ...domain.payment import EnrichedPayment, Payment
+        from ...domain.money import Money
+
+        # 1. Seed 120 baseline payments (past 7 days, 4% failure rate)
+        base_payments = []
+        for i in range(120):
+            status = PaymentStatus.FAILED if i < 5 else PaymentStatus.CAPTURED
+            base_payments.append(
+                EnrichedPayment(
+                    payment=Payment(
+                        id=f"pay_base_{i}",
+                        amount=Money(50000),
+                        status=status,
+                        method=PaymentMethod.UPI,
+                        created_at=NOW - timedelta(days=1, hours=i % 24, minutes=i % 60),
+                        error_code="BAD_REQUEST_ERROR" if status == PaymentStatus.FAILED else None,
+                        error_description="Timeout" if status == PaymentStatus.FAILED else None,
+                    )
+                )
+            )
+        self.db.save_payments(base_payments, merchant_id="m_test")
+
+        # 2. Add 3 recent UPI failures in current window
+        recent_fails = []
+        for i in range(3):
+            p = Payment(
+                id=f"pay_recent_fail_{i}",
+                amount=Money(50000),
+                status=PaymentStatus.FAILED,
+                method=PaymentMethod.UPI,
+                created_at=NOW - timedelta(minutes=5 * i + 1),
+                error_code="BAD_REQUEST_ERROR",
+                error_description="UPI bank timeout",
+            )
+            recent_fails.append(p)
+            self.db.save_payment(p, merchant_id="m_test")
+
+        # 3. Assemble context for the triggering payment
+        ctx = self.assembler.assemble(
+            payment=recent_fails[0],
+            merchant_id="m_test",
+            now=NOW,
+        )
+
+        # 4. Verify baseline_windows was passed and baseline metrics computed
+        self.assertIsNotNone(ctx.metrics.baseline)
+        self.assertTrue(ctx.metrics.baseline.is_sufficient)
+        self.assertEqual(ctx.metrics.baseline.decided_sample, 120)
+        self.assertIsNotNone(ctx.metrics.deviation)
+        self.assertIsNotNone(ctx.metrics.significance)
+        self.assertGreater(ctx.metrics.significance.z_score, 3.0)
+
+        # 5. Verify scenario classified as UPI_FAILURE_SPIKE incident
+        self.assertEqual(ctx.classification.scenario_id.value, "upi_failure_spike")
+        self.assertTrue(ctx.classification.is_incident)
+        self.assertTrue(ctx.classification.is_action_eligible)
+        self.assertIsNotNone(ctx.incident)
+
+    def test_context_assembler_handles_insufficient_historical_baseline_safely(self) -> None:
+        """When baseline has < 100 decided transactions, baseline is not sufficient and stops as INSUFFICIENT_DATA."""
+        from ...domain.payment import EnrichedPayment, Payment
+        from ...domain.money import Money
+
+        # Seed only 10 historical payments (< 100)
+        base_payments = [
+            EnrichedPayment(
+                payment=Payment(
+                    id=f"pay_tiny_base_{i}",
+                    amount=Money(50000),
+                    status=PaymentStatus.CAPTURED,
+                    method=PaymentMethod.UPI,
+                    created_at=NOW - timedelta(days=1, hours=i),
+                )
+            )
+            for i in range(10)
+        ]
+        self.db.save_payments(base_payments, merchant_id="m_test")
+
+        # Trigger payment
+        trigger = Payment(
+            id="pay_isolated_fail",
+            amount=Money(50000),
+            status=PaymentStatus.FAILED,
+            method=PaymentMethod.UPI,
+            created_at=NOW,
+            error_code="BAD_REQUEST_ERROR",
+            error_description="UPI bank timeout",
+        )
+        self.db.save_payment(trigger, merchant_id="m_test")
+
+        ctx = self.assembler.assemble(
+            payment=trigger,
+            merchant_id="m_test",
+            now=NOW,
+        )
+
+        self.assertIsNotNone(ctx.metrics.baseline)
+        self.assertFalse(ctx.metrics.baseline.is_sufficient)
+        self.assertEqual(ctx.classification.scenario_id.value, "insufficient_data")
+        self.assertFalse(ctx.classification.is_incident)
+        self.assertIsNone(ctx.incident)
+
+    def test_context_assembler_handles_empty_db_cold_start(self) -> None:
+        """When database is completely empty (no baseline), stops safely as INSUFFICIENT_DATA."""
+        from ...domain.payment import Payment
+        from ...domain.money import Money
+
+        trigger = Payment(
+            id="pay_cold_start",
+            amount=Money(50000),
+            status=PaymentStatus.FAILED,
+            method=PaymentMethod.CARD,
+            created_at=NOW,
+            error_code="BAD_REQUEST_ERROR",
+            error_description="Card processing error",
+        )
+
+        ctx = self.assembler.assemble(
+            payment=trigger,
+            merchant_id="m_test",
+            now=NOW,
+        )
+
+        self.assertIsNone(ctx.metrics.baseline)
+        self.assertEqual(ctx.classification.scenario_id.value, "insufficient_data")
+        self.assertFalse(ctx.classification.is_incident)
+        self.assertIsNone(ctx.incident)
+
+
 if __name__ == "__main__":
     unittest.main()
