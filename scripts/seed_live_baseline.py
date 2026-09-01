@@ -153,8 +153,8 @@ def main() -> int:
     # 4. Monitor Background Pipeline Execution
     print(f"\n[Step 4/4] Monitoring {len(job_ids)} background worker pipeline jobs...")
     completed_jobs = {}
-    for attempt in range(15):
-        time.sleep(2.0)
+    for attempt in range(40):
+        time.sleep(2.5)
         all_done = True
         for jid in job_ids:
             if jid in completed_jobs:

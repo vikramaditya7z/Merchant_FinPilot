@@ -128,7 +128,8 @@ class ContextAssembler:
         # 6. Construct FinancialIncident and attached Evidence only if is_incident is True
         incident = None
         if classification.is_incident:
-            inc_id = f"inc_{short_digest({'m': merchant_id, 'w': current_window.label(), 'rule': classification.scenario_id.value})}"
+            hourly_bucket = when.strftime("%Y%m%d%H")
+            inc_id = f"inc_{short_digest({'m': merchant_id, 'w': hourly_bucket, 'rule': classification.scenario_id.value})}"
             inc_key = f"key_{short_digest({'incident_id': inc_id, 'rule': classification.scenario_id.value})}"
 
             # Severity determination
