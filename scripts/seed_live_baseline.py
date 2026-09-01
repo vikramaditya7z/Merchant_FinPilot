@@ -151,52 +151,86 @@ def main() -> int:
         time.sleep(1)
 
     # 4. Monitor Background Pipeline Execution
-    print("\n[Step 4/4] Monitoring background worker pipeline execution...")
-    target_job = job_ids[-1]
-    completed = False
-    for attempt in range(12):
-        time.sleep(2.5)
-        j_status, job_res = send_http(f"{base_url}/api/v1/incidents/jobs/{target_job}")
-        if j_status != 200:
-            print(f"  [Attempt {attempt + 1}] Fetching job returned {j_status}...")
-            continue
+    print(f"\n[Step 4/4] Monitoring {len(job_ids)} background worker pipeline jobs...")
+    completed_jobs = {}
+    for attempt in range(15):
+        time.sleep(2.0)
+        all_done = True
+        for jid in job_ids:
+            if jid in completed_jobs:
+                continue
 
-        job_data = job_res.get("job", {})
-        status_val = job_data.get("status")
-        pipe_res = job_data.get("pipeline_result") or {}
-        scen_cls = pipe_res.get("scenario_classification") or {}
+            j_status, job_res = send_http(f"{base_url}/api/v1/incidents/jobs/{jid}")
+            if j_status != 200:
+                print(f"  [Attempt {attempt + 1}] Job {jid}: HTTP {j_status} -> {job_res}")
+                all_done = False
+                continue
 
-        print(f"  [Attempt {attempt + 1}] Status: {status_val.upper()} | Scenario: {scen_cls.get('scenario_id', 'evaluating')}")
+            job_data = job_res.get("job") if isinstance(job_res.get("job"), dict) else job_res
+            if not isinstance(job_data, dict):
+                job_data = {}
 
-        if status_val in ("completed", "failed", "escalated"):
-            completed = True
-            print("\n" + "=" * 70)
-            print(" PIPELINE EXECUTION SUMMARY")
-            print("=" * 70)
-            print(f"Final Status:       {status_val.upper()}")
-            print(f"Job ID:             {target_job}")
-            print(f"Incident ID:        {job_data.get('incident_id')}")
-            print(f"Classified Scenario:{scen_cls.get('scenario_id')}")
-            print(f"Confidence:         {scen_cls.get('confidence')}")
-            print(f"Rationale:          {scen_cls.get('rationale')}")
+            status_val = str(job_data.get("status") or "evaluating").lower()
+            pipe_res = job_data.get("pipeline_result")
+            if not pipe_res and job_data.get("payload_json"):
+                try:
+                    pipe_res = json.loads(job_data["payload_json"])
+                except Exception:
+                    pipe_res = {}
+            if not isinstance(pipe_res, dict):
+                pipe_res = {}
 
-            # Verify & Authorize checks
-            v_res = pipe_res.get("verification_result") or {}
-            print(f"VERIFY Gate:        {v_res.get('status', 'N/A')} ({v_res.get('summary', 'N/A')})")
+            scen_cls = pipe_res.get("scenario_classification") or {}
+            scen_id = scen_cls.get("scenario_id") or "evaluating"
 
-            pol_res = pipe_res.get("policy_decision") or {}
-            print(f"AUTHORIZE Gate:     {pol_res.get('verdict', 'N/A')} ({pol_res.get('rationale', 'N/A')})")
+            print(f"  [Attempt {attempt + 1}] Job {jid}: Status={status_val.upper()} | Scenario={scen_id}")
 
-            exec_res = pipe_res.get("execution_result") or {}
-            print(f"EXECUTE Stage:      Outcome: {exec_res.get('outcome', 'N/A')}")
-            if exec_res.get("provider_reference"):
-                print(f"Razorpay Reference: {exec_res.get('provider_reference')}")
-            print("=" * 70)
+            if status_val in ("completed", "failed", "escalated"):
+                completed_jobs[jid] = {
+                    "job_data": job_data,
+                    "pipe_res": pipe_res,
+                    "status": status_val,
+                }
+            else:
+                all_done = False
+
+        if all_done:
             break
 
-    if not completed:
-        print(f"\n⚠️ Pipeline still running in background. Inspect via dashboard or /api/v1/incidents/jobs/{target_job}")
+    print("\n" + "=" * 70)
+    print(" CLUSTER EXECUTION SUMMARY")
+    print("=" * 70)
+    for jid in job_ids:
+        info = completed_jobs.get(jid, {})
+        jdata = info.get("job_data", {})
+        pres = info.get("pipe_res", {})
+        s_val = info.get("status", "unknown").upper()
+        s_cls = pres.get("scenario_classification") or {}
 
+        print(f"\n▶ Job: {jid} [{s_val}]")
+        print(f"  Incident ID:        {jdata.get('incident_id', 'N/A')}")
+        print(f"  Payment ID:         {jdata.get('payment_id', 'N/A')}")
+        print(f"  Scenario:           {s_cls.get('scenario_id', 'N/A')} (confidence: {s_cls.get('confidence', 'N/A')})")
+        if s_cls.get("rationale"):
+            print(f"  Rationale:          {s_cls.get('rationale')}")
+
+        v_res = pres.get("verification_result") or {}
+        if v_res:
+            print(f"  VERIFY Gate:        {v_res.get('status', 'N/A')} ({v_res.get('summary', 'N/A')})")
+
+        pol_res = pres.get("policy_decision") or {}
+        if pol_res:
+            print(f"  AUTHORIZE Gate:     {pol_res.get('verdict', 'N/A')} ({pol_res.get('rationale', 'N/A')})")
+
+        exec_res = pres.get("execution_result") or {}
+        if exec_res:
+            print(f"  EXECUTE Stage:      Outcome: {exec_res.get('outcome', 'N/A')}")
+            if exec_res.get("provider_reference"):
+                print(f"  Razorpay Ref:       {exec_res.get('provider_reference')}")
+            if exec_res.get("action_type"):
+                print(f"  Action Executed:    {exec_res.get('action_type')}")
+
+    print("=" * 70)
     return 0
 
 
