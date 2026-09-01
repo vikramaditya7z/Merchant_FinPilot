@@ -85,6 +85,9 @@ class Database:
             self._conn.execute("PRAGMA foreign_keys = ON;")
             if self.db_path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL;")
+                self._conn.execute("PRAGMA synchronous = NORMAL;")
+                self._conn.execute("PRAGMA temp_store = MEMORY;")
+                self._conn.execute("PRAGMA cache_size = -64000;")
             self._conn.executescript(SCHEMA_DDL)
 
     @synchronized

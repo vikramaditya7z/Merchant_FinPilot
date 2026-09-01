@@ -360,6 +360,51 @@ class DatabaseFileIsolationTests(unittest.TestCase):
                 if os.path.exists(extra):
                     os.remove(extra)
 
+    def test_file_database_bulk_baseline_persistence_and_pragmas(self):
+        """Requirement: File-backed SQLite applies WAL optimizations and persists large baselines reliably."""
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            db1 = Database(temp_path)
+
+            # 1. Verify PRAGMAs
+            jm = db1._conn.execute("PRAGMA journal_mode;").fetchone()[0]
+            self.assertEqual(str(jm).lower(), "wal")
+
+            sync_val = db1._conn.execute("PRAGMA synchronous;").fetchone()[0]
+            self.assertEqual(int(sync_val), 1)  # 1 = NORMAL
+
+            ts_val = db1._conn.execute("PRAGMA temp_store;").fetchone()[0]
+            self.assertEqual(int(ts_val), 2)  # 2 = MEMORY
+
+            cs_val = db1._conn.execute("PRAGMA cache_size;").fetchone()[0]
+            self.assertEqual(int(cs_val), -64000)
+
+            # 2. Insert representative baseline
+            scen_data = generate_scenario(ScenarioId.NORMAL)
+            payments = scen_data.agent_enriched()
+            self.assertGreaterEqual(len(payments), 1000)
+
+            db1.save_payments(payments, merchant_id="merchant_alpha")
+            self.assertEqual(len(list(db1.list_payments())), len(payments))
+            db1.close()
+
+            # 3. Verify readable in new instance
+            db2 = Database(temp_path)
+            self.assertEqual(len(list(db2.list_payments())), len(payments))
+            first_pay_id = payments[0].payment.id if hasattr(payments[0], "payment") else payments[0].id
+            first_pay = db2.get_payment(first_pay_id)
+            self.assertIsNotNone(first_pay)
+            self.assertEqual(first_pay.id, first_pay_id)
+            db2.close()
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            for extra in (temp_path + "-wal", temp_path + "-shm"):
+                if os.path.exists(extra):
+                    os.remove(extra)
+
 
 if __name__ == "__main__":
     unittest.main()

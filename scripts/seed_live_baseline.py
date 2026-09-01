@@ -19,12 +19,12 @@ import urllib.request
 import urllib.error
 
 
-def send_http(url: str, method: str = "GET", data: bytes = None, headers: dict = None) -> tuple:
+def send_http(url: str, method: str = "GET", data: bytes = None, headers: dict = None, timeout: int = 30) -> tuple:
     """Send an HTTP request using Python standard library (no extra dependencies)."""
     headers = headers or {}
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             status = resp.status
             body_bytes = resp.read()
             body_json = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
@@ -79,7 +79,8 @@ def main() -> int:
         f"{base_url}/api/v1/incidents/process",
         method="POST",
         data=seed_payload,
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
+        timeout=120,
     )
     if status not in (200, 201):
         print(f"❌ Baseline seeding failed ({status}): {seed_res}")
