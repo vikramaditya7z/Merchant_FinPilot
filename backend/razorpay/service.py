@@ -320,10 +320,16 @@ class RazorpayService:
 
         with self._get_merchant_lock(merchant_id):
             try:
-                # 1. Transition to PROCESSING
+                # 1. Transition to PROCESSING with initial detection progress
+                initial_progress = {
+                    "current_stage": "detection",
+                    "stage_status": "running",
+                    "is_completed": False,
+                }
                 self._db.update_trigger_status(
                     job_id=trigger.job_id,
                     status=TriggerStatus.PROCESSING.value,
+                    payload_json=json.dumps(initial_progress),
                 )
 
                 # 2. Assemble context & classify scenario
@@ -334,13 +340,34 @@ class RazorpayService:
 
                 canonical_inc_id = ctx.incident.incident_id if ctx.incident else trigger.incident_id
 
-                # 3. Process through orchestrator pipeline
+                # Define live progress callback to persist intermediate stage transitions
+                def on_job_progress(ev: Dict[str, Any]) -> None:
+                    stage = ev.get("stage")
+                    st = ev.get("status")
+                    if stage and stage != "pipeline":
+                        try:
+                            stage_progress = {
+                                "current_stage": stage,
+                                "stage_status": st,
+                                "is_completed": False,
+                                "details": ev.get("details"),
+                            }
+                            self._db.update_trigger_status(
+                                job_id=trigger.job_id,
+                                status=TriggerStatus.PROCESSING.value,
+                                payload_json=json.dumps(stage_progress),
+                            )
+                        except Exception:
+                            pass
+
+                # 3. Process through orchestrator pipeline with live stage progress
                 result: PipelineResult = self._orchestrator.process_incident(
                     incident=ctx.incident,
                     metrics=ctx.metrics,
                     payments=ctx.recent_payments,
                     baseline_payments=ctx.baseline_payments,
                     merchant_id=merchant_id,
+                    on_progress=on_job_progress,
                 )
 
                 # 4. Serialize outcome and update status

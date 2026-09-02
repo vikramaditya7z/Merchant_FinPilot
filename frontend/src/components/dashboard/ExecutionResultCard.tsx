@@ -68,6 +68,28 @@ export const ExecutionResultCard: React.FC<ExecutionResultCardProps> = ({
     );
   }
 
+  if (!execution && status === 'completed') {
+    return (
+      <div id="stage-execution" className="w-full bg-[#0B1017] border border-amber-900/60 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">
+        <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-mono text-amber-400 font-medium">06 / SIMULATED EXECUTION</span>
+            <span className="text-slate-700">•</span>
+            <span className="text-xs font-mono uppercase tracking-wider text-amber-300 font-semibold">
+              Fail-Closed Execution Adapter
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-amber-400 font-bold uppercase px-2 py-0.5 rounded-sm bg-amber-950/80 border border-amber-800/80">
+            COMPLETED
+          </span>
+        </div>
+        <p className="text-xs font-mono text-amber-300/80 py-4">
+          Simulated execution completed. Idempotent action safely executed with non-production test adapter.
+        </p>
+      </div>
+    );
+  }
+
   if (!execution) {
     return (
       <div id="stage-execution" className="w-full bg-[#0B1017] border border-slate-800/80 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">

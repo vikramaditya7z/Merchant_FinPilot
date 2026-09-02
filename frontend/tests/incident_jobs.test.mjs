@@ -147,9 +147,11 @@ function deriveStageTimings(res, jobStatus) {
     };
   }
 
-  const finalStageName = res.final_stage || 'detection';
-  const targetIndex = STAGE_ORDER.indexOf(finalStageName);
-  const finalIdx = res.is_completed ? 5 : (targetIndex >= 0 ? targetIndex : 0);
+  const stageName = (res.current_stage || res.final_stage || 'detection');
+  const stageStatus = (res.stage_status || (isProcessing ? 'running' : 'completed'));
+  const targetIndex = STAGE_ORDER.indexOf(stageName);
+  const currentIdx = targetIndex >= 0 ? targetIndex : 0;
+  const finalIdx = res.is_completed ? 5 : currentIdx;
 
   const timings = {
     detection: { status: 'waiting' },
@@ -161,27 +163,52 @@ function deriveStageTimings(res, jobStatus) {
   };
 
   STAGE_ORDER.forEach((sId, idx) => {
-    if (idx < finalIdx || (idx === finalIdx && res.is_completed)) {
+    if (res.is_completed) {
+      timings[sId] = {
+        status: idx === 5 && res.execution_result?.status === 'skipped_duplicate' ? 'duplicate' : 'completed',
+        startedAt: res.started_at,
+        completedAt: res.completed_at,
+      };
+    } else if (idx < currentIdx) {
+      // Invariant: All stages before currentIdx are completed
       timings[sId] = {
         status: 'completed',
         startedAt: res.started_at,
         completedAt: res.completed_at,
       };
-    } else if (idx === finalIdx) {
-      timings[sId] = {
-        status: res.is_failed
-          ? 'failed'
-          : res.is_stopped
-          ? 'blocked'
-          : isProcessing && !res.is_completed
-          ? 'running'
-          : 'completed',
-        startedAt: res.started_at,
-        completedAt: res.completed_at,
-        details: res.stop_reason || undefined,
-      };
+    } else if (idx === currentIdx) {
+      if (res.is_failed || isFailed) {
+        timings[sId] = {
+          status: 'failed',
+          startedAt: res.started_at,
+          completedAt: res.completed_at,
+          details: res.stop_reason || res.details,
+        };
+      } else if (res.is_stopped) {
+        timings[sId] = {
+          status: 'blocked',
+          startedAt: res.started_at,
+          completedAt: res.completed_at,
+          details: res.stop_reason || res.details,
+        };
+      } else if (stageStatus === 'running' || (isProcessing && !res.is_completed && stageStatus !== 'completed')) {
+        timings[sId] = {
+          status: 'running',
+          startedAt: res.started_at,
+          details: res.details,
+        };
+      } else {
+        timings[sId] = {
+          status: 'completed',
+          startedAt: res.started_at,
+          completedAt: res.completed_at,
+          details: res.details,
+        };
+      }
     } else {
-      timings[sId] = { status: isProcessing ? 'waiting' : 'skipped' };
+      timings[sId] = {
+        status: (isProcessing && !res.is_completed && !res.is_stopped && !res.is_failed) ? 'waiting' : 'skipped',
+      };
     }
   });
 
@@ -492,6 +519,172 @@ runTest('Existing completed-job rendering hydrates full response and marks all 6
   assert.equal(mgr.stageTimings.verification.status, 'completed');
   assert.equal(mgr.stageTimings.policy.status, 'completed');
   assert.equal(mgr.stageTimings.execution.status, 'completed');
+});
+
+// 14. Scenario Simulator Stage Progression Invariant & State Machine
+runTest('Scenario Simulator progresses through all 6 stages maintaining completed stage invariants', () => {
+  let stageTimings = {
+    detection: { status: 'waiting' },
+    investigation: { status: 'waiting' },
+    agent: { status: 'waiting' },
+    verification: { status: 'waiting' },
+    policy: { status: 'waiting' },
+    execution: { status: 'waiting' },
+  };
+
+  function applyStageEvent(stageId, status, details) {
+    const stageIdx = STAGE_ORDER.indexOf(stageId);
+    const next = { ...stageTimings };
+    if (status === 'running') {
+      STAGE_ORDER.forEach((sId, idx) => {
+        if (idx < stageIdx) {
+          if (next[sId]?.status !== 'completed') {
+            next[sId] = { ...next[sId], status: 'completed' };
+          }
+        } else if (idx === stageIdx) {
+          next[sId] = { ...next[sId], status: 'running', details };
+        } else {
+          next[sId] = { status: 'waiting' };
+        }
+      });
+    } else if (status === 'completed') {
+      STAGE_ORDER.forEach((sId, idx) => {
+        if (idx <= stageIdx) {
+          next[sId] = { ...next[sId], status: 'completed', details };
+        }
+      });
+    }
+    stageTimings = next;
+  }
+
+  // 1. Detection running
+  applyStageEvent('detection', 'running');
+  assert.equal(stageTimings.detection.status, 'running');
+  assert.equal(stageTimings.investigation.status, 'waiting');
+
+  // 2. Detection completed
+  applyStageEvent('detection', 'completed');
+  assert.equal(stageTimings.detection.status, 'completed');
+  assert.equal(stageTimings.investigation.status, 'waiting');
+
+  // 3. Investigation running
+  applyStageEvent('investigation', 'running');
+  assert.equal(stageTimings.detection.status, 'completed');
+  assert.equal(stageTimings.investigation.status, 'running');
+  assert.equal(stageTimings.agent.status, 'waiting');
+
+  // 4. Investigation completed
+  applyStageEvent('investigation', 'completed');
+  assert.equal(stageTimings.detection.status, 'completed');
+  assert.equal(stageTimings.investigation.status, 'completed');
+  assert.equal(stageTimings.agent.status, 'waiting');
+
+  // 5. Reason / Gemini running
+  applyStageEvent('agent', 'running');
+  assert.equal(stageTimings.detection.status, 'completed');
+  assert.equal(stageTimings.investigation.status, 'completed');
+  assert.equal(stageTimings.agent.status, 'running');
+  assert.equal(stageTimings.verification.status, 'waiting');
+
+  // 6. Reason / Gemini completed
+  applyStageEvent('agent', 'completed');
+  assert.equal(stageTimings.detection.status, 'completed');
+  assert.equal(stageTimings.investigation.status, 'completed');
+  assert.equal(stageTimings.agent.status, 'completed');
+  assert.equal(stageTimings.verification.status, 'waiting');
+
+  // 7. Verification running and completed
+  applyStageEvent('verification', 'running');
+  assert.equal(stageTimings.agent.status, 'completed');
+  assert.equal(stageTimings.verification.status, 'running');
+  applyStageEvent('verification', 'completed');
+  assert.equal(stageTimings.verification.status, 'completed');
+
+  // 8. Authorization running and completed
+  applyStageEvent('policy', 'running');
+  assert.equal(stageTimings.verification.status, 'completed');
+  assert.equal(stageTimings.policy.status, 'running');
+  applyStageEvent('policy', 'completed');
+  assert.equal(stageTimings.policy.status, 'completed');
+
+  // 9. Execution running and completed
+  applyStageEvent('execution', 'running');
+  assert.equal(stageTimings.policy.status, 'completed');
+  assert.equal(stageTimings.execution.status, 'running');
+  applyStageEvent('execution', 'completed');
+  assert.equal(stageTimings.execution.status, 'completed');
+
+  // All 6 stages completed
+  STAGE_ORDER.forEach((sId) => {
+    assert.equal(stageTimings[sId].status, 'completed');
+  });
+});
+
+// 15. Invariant: Previously completed stages NEVER revert to WAITING or NOT RUN
+runTest('Previously completed stages NEVER revert to WAITING or NOT RUN when later stages run', () => {
+  const partialProcessingPayload = {
+    current_stage: 'agent',
+    stage_status: 'running',
+    is_completed: false,
+  };
+
+  const { timings } = deriveStageTimings(partialProcessingPayload, 'processing');
+  // Detection and Investigation MUST be completed, Reason must be running, downstream waiting
+  assert.equal(timings.detection.status, 'completed');
+  assert.equal(timings.investigation.status, 'completed');
+  assert.equal(timings.agent.status, 'running');
+  assert.equal(timings.verification.status, 'waiting');
+  assert.equal(timings.policy.status, 'waiting');
+  assert.equal(timings.execution.status, 'waiting');
+});
+
+// 16. Gemini BLOCKED state correctly halts downstream stages without frontend error
+runTest('Gemini BLOCKED correctly stops downstream stages and badges agent as blocked', () => {
+  const stoppedPayload = {
+    final_stage: 'agent',
+    is_completed: false,
+    is_stopped: true,
+    is_failed: false,
+    stop_reason: 'Agent produced diagnostic findings without a proposed action intent: Insufficient data in window',
+  };
+
+  const { timings, finalIdx } = deriveStageTimings(stoppedPayload, 'completed');
+  assert.equal(finalIdx, 2);
+  assert.equal(timings.detection.status, 'completed');
+  assert.equal(timings.investigation.status, 'completed');
+  assert.equal(timings.agent.status, 'blocked');
+  assert.equal(timings.verification.status, 'skipped');
+  assert.equal(timings.policy.status, 'skipped');
+  assert.equal(timings.execution.status, 'skipped');
+});
+
+// 17. Live Incident Job intermediate progress exposure
+runTest('Live job worker intermediate progress maps to progressive stage timings', () => {
+  // 1. Initial worker pickup
+  const t1 = deriveStageTimings({ current_stage: 'detection', stage_status: 'running', is_completed: false }, 'processing');
+  assert.equal(t1.timings.detection.status, 'running');
+  assert.equal(t1.timings.investigation.status, 'waiting');
+
+  // 2. Investigation active
+  const t2 = deriveStageTimings({ current_stage: 'investigation', stage_status: 'running', is_completed: false }, 'processing');
+  assert.equal(t2.timings.detection.status, 'completed');
+  assert.equal(t2.timings.investigation.status, 'running');
+  assert.equal(t2.timings.agent.status, 'waiting');
+
+  // 3. Verification active
+  const t3 = deriveStageTimings({ current_stage: 'verification', stage_status: 'running', is_completed: false }, 'processing');
+  assert.equal(t3.timings.detection.status, 'completed');
+  assert.equal(t3.timings.investigation.status, 'completed');
+  assert.equal(t3.timings.agent.status, 'completed');
+  assert.equal(t3.timings.verification.status, 'running');
+  assert.equal(t3.timings.policy.status, 'waiting');
+  assert.equal(t3.timings.execution.status, 'waiting');
+
+  // 4. Execution active
+  const t4 = deriveStageTimings({ current_stage: 'execution', stage_status: 'running', is_completed: false }, 'processing');
+  assert.equal(t4.timings.verification.status, 'completed');
+  assert.equal(t4.timings.policy.status, 'completed');
+  assert.equal(t4.timings.execution.status, 'running');
 });
 
 console.log(`\nResults: ${passed} passed, ${failed} failed.\n`);

@@ -53,6 +53,18 @@ export const StageStepper: React.FC<StageStepperProps> = ({
   onSelectStage,
 }) => {
   const getStageStatus = (stage: StageConfig, index: number): StageStatus => {
+    // 1. Live stage timings take highest priority if actively running, completed, blocked, or failed
+    if (stageTimings && stageTimings[stage.id]) {
+      const liveStatus = stageTimings[stage.id].status;
+      if (liveStatus && liveStatus !== 'waiting') {
+        if (liveStatus === 'completed' && index === 5 && response?.execution_result?.status === 'skipped_duplicate') {
+          return 'duplicate';
+        }
+        return liveStatus as StageStatus;
+      }
+    }
+
+    // 2. Authoritative response derivation when completed or reporting intermediate stage
     if (response) {
       const stageOrder: StageId[] = [
         'detection',
@@ -62,9 +74,9 @@ export const StageStepper: React.FC<StageStepperProps> = ({
         'policy',
         'execution',
       ];
-      const finalStageIndex = stageOrder.indexOf(
-        (response.final_stage as StageId) || 'detection'
-      );
+      const stageName = ((response as any).current_stage || response.final_stage || 'detection') as StageId;
+      const targetIndex = stageOrder.indexOf(stageName);
+      const finalStageIndex = response.is_completed ? 5 : (targetIndex >= 0 ? targetIndex : 0);
 
       if (response.is_completed) {
         if (index === 5 && response.execution_result?.status === 'skipped_duplicate') {
@@ -77,14 +89,12 @@ export const StageStepper: React.FC<StageStepperProps> = ({
       if (index === finalStageIndex) {
         if (response.is_failed) return 'failed';
         if (response.is_stopped) return 'blocked';
+        const st = (response as any).stage_status;
+        if (st === 'running') return 'running';
+        if (st === 'completed') return 'completed';
         return 'completed';
       }
-      return 'skipped';
-    }
-
-    if (stageTimings && stageTimings[stage.id]) {
-      const liveStatus = stageTimings[stage.id].status;
-      if (liveStatus && liveStatus !== 'waiting') return liveStatus as StageStatus;
+      return 'waiting';
     }
 
     if (isLoading && index === activeStageIndex) return 'running';

@@ -152,9 +152,11 @@ const deriveStageTimings = (res: ProcessIncidentResponse | null, jobStatus?: str
     };
   }
 
-  const finalStageName = (res.final_stage as StageId) || 'detection';
-  const targetIndex = STAGE_ORDER.indexOf(finalStageName);
-  const finalIdx = res.is_completed ? 5 : (targetIndex >= 0 ? targetIndex : 0);
+  const stageName = ((res as any).current_stage || res.final_stage || 'detection') as StageId;
+  const stageStatus = ((res as any).stage_status || (isProcessing ? 'running' : 'completed')) as string;
+  const targetIndex = STAGE_ORDER.indexOf(stageName);
+  const currentIdx = targetIndex >= 0 ? targetIndex : 0;
+  const finalIdx = res.is_completed ? 5 : currentIdx;
 
   const timings: Record<StageId, StageExecutionTiming> = {
     detection: { status: 'waiting' },
@@ -166,27 +168,53 @@ const deriveStageTimings = (res: ProcessIncidentResponse | null, jobStatus?: str
   };
 
   STAGE_ORDER.forEach((sId, idx) => {
-    if (idx < finalIdx || (idx === finalIdx && res.is_completed)) {
+    if (res.is_completed) {
+      timings[sId] = {
+        status: idx === 5 && res.execution_result?.status === 'skipped_duplicate' ? 'duplicate' : 'completed',
+        startedAt: res.started_at,
+        completedAt: res.completed_at,
+      };
+    } else if (idx < currentIdx) {
+      // All stages before currentIdx are completed
       timings[sId] = {
         status: 'completed',
         startedAt: res.started_at,
         completedAt: res.completed_at,
       };
-    } else if (idx === finalIdx) {
-      timings[sId] = {
-        status: res.is_failed
-          ? 'failed'
-          : res.is_stopped
-          ? 'blocked'
-          : isProcessing && !res.is_completed
-          ? 'running'
-          : 'completed',
-        startedAt: res.started_at,
-        completedAt: res.completed_at,
-        details: res.stop_reason || undefined,
-      };
+    } else if (idx === currentIdx) {
+      if (res.is_failed || isFailed) {
+        timings[sId] = {
+          status: 'failed',
+          startedAt: res.started_at,
+          completedAt: res.completed_at,
+          details: res.stop_reason || (res as any).details,
+        };
+      } else if (res.is_stopped) {
+        timings[sId] = {
+          status: 'blocked',
+          startedAt: res.started_at,
+          completedAt: res.completed_at,
+          details: res.stop_reason || (res as any).details,
+        };
+      } else if (stageStatus === 'running' || (isProcessing && !res.is_completed && stageStatus !== 'completed')) {
+        timings[sId] = {
+          status: 'running',
+          startedAt: res.started_at,
+          details: (res as any).details,
+        };
+      } else {
+        timings[sId] = {
+          status: 'completed',
+          startedAt: res.started_at,
+          completedAt: res.completed_at,
+          details: (res as any).details,
+        };
+      }
     } else {
-      timings[sId] = { status: isProcessing ? 'waiting' : 'skipped' };
+      // Stages after currentIdx: waiting if still processing, skipped if stopped or failed
+      timings[sId] = {
+        status: (isProcessing && !res.is_completed && !res.is_stopped && !res.is_failed) ? 'waiting' : 'skipped',
+      };
     }
   });
 
@@ -394,79 +422,128 @@ export const App: React.FC = () => {
         const nowIso = event.timestamp || new Date().toISOString();
 
         if (event.status === 'running') {
-          setStageTimings((prev) => ({
-            ...prev,
-            [stageId]: {
-              ...prev[stageId],
-              status: 'running',
-              startedAt: nowIso,
-              details: event.details,
-            },
-          }));
+          setStageTimings((prev) => {
+            const next = { ...prev };
+            STAGE_ORDER.forEach((sId, idx) => {
+              if (idx < stageIdx) {
+                // Invariant: all stages before current running stage MUST be completed
+                if (next[sId]?.status !== 'completed') {
+                  next[sId] = {
+                    ...next[sId],
+                    status: 'completed',
+                    completedAt: next[sId]?.completedAt || nowIso,
+                  };
+                }
+              } else if (idx === stageIdx) {
+                next[sId] = {
+                  ...next[sId],
+                  status: 'running',
+                  startedAt: next[sId]?.startedAt || nowIso,
+                  details: event.details,
+                };
+              } else {
+                // Invariant: all stages after current running stage remain waiting
+                next[sId] = {
+                  status: 'waiting',
+                };
+              }
+            });
+            return next;
+          });
         } else if (event.status === 'completed') {
           setStageTimings((prev) => {
-            const started = prev[stageId]?.startedAt
-              ? new Date(prev[stageId].startedAt!).getTime()
-              : new Date(nowIso).getTime();
-            const ended = new Date(nowIso).getTime();
-            const durationMs = Math.max(0, ended - started);
-            return {
-              ...prev,
-              [stageId]: {
-                ...prev[stageId],
-                status: 'completed',
-                completedAt: nowIso,
-                durationMs,
-                details: event.details,
-              },
-            };
+            const next = { ...prev };
+            STAGE_ORDER.forEach((sId, idx) => {
+              if (idx < stageIdx) {
+                if (next[sId]?.status !== 'completed') {
+                  next[sId] = {
+                    ...next[sId],
+                    status: 'completed',
+                    completedAt: next[sId]?.completedAt || nowIso,
+                  };
+                }
+              } else if (idx === stageIdx) {
+                const started = prev[stageId]?.startedAt
+                  ? new Date(prev[stageId].startedAt!).getTime()
+                  : new Date(nowIso).getTime();
+                const ended = new Date(nowIso).getTime();
+                next[sId] = {
+                  ...next[sId],
+                  status: 'completed',
+                  completedAt: nowIso,
+                  durationMs: Math.max(0, ended - started),
+                  details: event.details,
+                };
+              }
+            });
+            return next;
           });
         } else if (event.status === 'blocked' || event.status === 'stopped') {
           setStageTimings((prev) => {
-            const started = prev[stageId]?.startedAt
-              ? new Date(prev[stageId].startedAt!).getTime()
-              : new Date(nowIso).getTime();
-            const ended = new Date(nowIso).getTime();
-            const durationMs = Math.max(0, ended - started);
-            return {
-              ...prev,
-              [stageId]: {
-                ...prev[stageId],
-                status: 'blocked',
-                completedAt: nowIso,
-                durationMs,
-                details: event.details,
-              },
-            };
+            const next = { ...prev };
+            STAGE_ORDER.forEach((sId, idx) => {
+              if (idx < stageIdx) {
+                if (next[sId]?.status !== 'completed') {
+                  next[sId] = {
+                    ...next[sId],
+                    status: 'completed',
+                    completedAt: next[sId]?.completedAt || nowIso,
+                  };
+                }
+              } else if (idx === stageIdx) {
+                const started = prev[stageId]?.startedAt
+                  ? new Date(prev[stageId].startedAt!).getTime()
+                  : new Date(nowIso).getTime();
+                const ended = new Date(nowIso).getTime();
+                next[sId] = {
+                  ...next[sId],
+                  status: 'blocked',
+                  completedAt: nowIso,
+                  durationMs: Math.max(0, ended - started),
+                  details: event.details,
+                };
+              } else {
+                next[sId] = { status: 'skipped' };
+              }
+            });
+            return next;
           });
         } else if (event.status === 'failed') {
           setStageTimings((prev) => {
-            const started = prev[stageId]?.startedAt
-              ? new Date(prev[stageId].startedAt!).getTime()
-              : new Date(nowIso).getTime();
-            const ended = new Date(nowIso).getTime();
-            const durationMs = Math.max(0, ended - started);
-            return {
-              ...prev,
-              [stageId]: {
-                ...prev[stageId],
-                status: 'failed',
-                completedAt: nowIso,
-                durationMs,
-                details: event.details,
-              },
-            };
+            const next = { ...prev };
+            STAGE_ORDER.forEach((sId, idx) => {
+              if (idx < stageIdx) {
+                if (next[sId]?.status !== 'completed') {
+                  next[sId] = {
+                    ...next[sId],
+                    status: 'completed',
+                    completedAt: next[sId]?.completedAt || nowIso,
+                  };
+                }
+              } else if (idx === stageIdx) {
+                const started = prev[stageId]?.startedAt
+                  ? new Date(prev[stageId].startedAt!).getTime()
+                  : new Date(nowIso).getTime();
+                const ended = new Date(nowIso).getTime();
+                next[sId] = {
+                  ...next[sId],
+                  status: 'failed',
+                  completedAt: nowIso,
+                  durationMs: Math.max(0, ended - started),
+                  details: event.details,
+                };
+              } else {
+                next[sId] = { status: 'skipped' };
+              }
+            });
+            return next;
           });
         }
 
-        // Allow the browser compositor and React to paint each distinct stage transition
-        await new Promise<void>((resolve) => {
-          if (typeof window !== 'undefined' && window.requestAnimationFrame) {
-            window.requestAnimationFrame(() => resolve());
-          } else {
-            setTimeout(resolve, 0);
-          }
-        });
+        // Pacing: Ensure the UI compositor and user have enough time to observe each stage transition.
+        // Fast in-memory stages (Detection, Investigation, Verification, Policy, Execution) take <2ms on backend.
+        // We pause slightly (120ms) between stage events so each stage's RUNNING and COMPLETED states are perceptible.
+        await new Promise<void>((resolve) => setTimeout(resolve, 120));
       };
 
       const finalRes = await apiClient.processIncidentStream(
@@ -485,11 +562,32 @@ export const App: React.FC = () => {
       const targetIndex = STAGE_ORDER.indexOf(finalStageName);
       const finalIdx = finalRes.is_completed ? 5 : (targetIndex >= 0 ? targetIndex : 0);
 
+      // Hydrate final stage timings without erasing real progress already recorded
       setStageTimings((prev) => {
         const nextTimings = { ...prev };
         STAGE_ORDER.forEach((sId, idx) => {
-          if (idx > finalIdx && nextTimings[sId].status === 'waiting') {
-            nextTimings[sId] = { ...nextTimings[sId], status: 'skipped' };
+          if (finalRes.is_completed) {
+            nextTimings[sId] = {
+              ...nextTimings[sId],
+              status: idx === 5 && finalRes.execution_result?.status === 'skipped_duplicate' ? 'duplicate' : 'completed',
+              startedAt: nextTimings[sId]?.startedAt || finalRes.started_at,
+              completedAt: nextTimings[sId]?.completedAt || finalRes.completed_at,
+            };
+          } else if (idx < finalIdx) {
+            nextTimings[sId] = {
+              ...nextTimings[sId],
+              status: 'completed',
+              startedAt: nextTimings[sId]?.startedAt || finalRes.started_at,
+              completedAt: nextTimings[sId]?.completedAt || finalRes.completed_at,
+            };
+          } else if (idx === finalIdx) {
+            nextTimings[sId] = {
+              ...nextTimings[sId],
+              status: finalRes.is_failed ? 'failed' : finalRes.is_stopped ? 'blocked' : 'completed',
+              details: finalRes.stop_reason || undefined,
+            };
+          } else {
+            nextTimings[sId] = { status: 'skipped' };
           }
         });
         return nextTimings;

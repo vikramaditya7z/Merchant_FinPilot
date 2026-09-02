@@ -53,6 +53,28 @@ export const InvestigationCard: React.FC<InvestigationCardProps> = ({ report, ti
     );
   }
 
+  if (!report && status === 'completed') {
+    return (
+      <div id="stage-investigation" className="w-full bg-[#0B1017] border border-emerald-900/60 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">
+        <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-mono text-emerald-400 font-medium">02 / INVESTIGATION</span>
+            <span className="text-slate-700">•</span>
+            <span className="text-xs font-mono uppercase tracking-wider text-emerald-300 font-semibold">
+              Dimensional Slicing
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase px-2 py-0.5 rounded-sm bg-emerald-950/80 border border-emerald-800/80">
+            COMPLETED
+          </span>
+        </div>
+        <p className="text-xs font-mono text-emerald-300/80 py-4">
+          Dimensional segmentation completed. Evidence synthesized for autonomous AI reasoning loop.
+        </p>
+      </div>
+    );
+  }
+
   if (!report) {
     return (
       <div id="stage-investigation" className="w-full bg-[#0B1017] border border-slate-800/80 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">

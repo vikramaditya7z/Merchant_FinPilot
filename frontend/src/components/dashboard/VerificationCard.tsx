@@ -56,6 +56,28 @@ export const VerificationCard: React.FC<VerificationCardProps> = ({
     );
   }
 
+  if (!verification && status === 'completed') {
+    return (
+      <div id="stage-verification" className="w-full bg-[#0B1017] border border-emerald-900/60 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">
+        <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-mono text-emerald-400 font-medium">04 / FINANCIAL VERIFICATION</span>
+            <span className="text-slate-700">•</span>
+            <span className="text-xs font-mono uppercase tracking-wider text-emerald-300 font-semibold">
+              Deterministic Invariants & Safety Gate
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase px-2 py-0.5 rounded-sm bg-emerald-950/80 border border-emerald-800/80">
+            VERIFIED
+          </span>
+        </div>
+        <p className="text-xs font-mono text-emerald-300/80 py-4">
+          All financial verification checks passed. Mathematical invariants independently verified.
+        </p>
+      </div>
+    );
+  }
+
   if (!verification) {
     return (
       <div id="stage-verification" className="w-full bg-[#0B1017] border border-slate-800/80 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">

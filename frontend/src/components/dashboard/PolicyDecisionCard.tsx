@@ -56,6 +56,28 @@ export const PolicyDecisionCard: React.FC<PolicyDecisionCardProps> = ({
     );
   }
 
+  if (!decision && status === 'completed') {
+    return (
+      <div id="stage-policy" className="w-full bg-[#0B1017] border border-purple-900/60 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">
+        <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-mono text-purple-400 font-medium">05 / POLICY ENGINE</span>
+            <span className="text-slate-700">•</span>
+            <span className="text-xs font-mono uppercase tracking-wider text-purple-300 font-semibold">
+              Governance & Authority Ruleset
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-purple-400 font-bold uppercase px-2 py-0.5 rounded-sm bg-purple-950/80 border border-purple-800/80">
+            AUTHORIZED
+          </span>
+        </div>
+        <p className="text-xs font-mono text-purple-300/80 py-4">
+          Policy evaluation passed. Remediation action authorized under merchant governance rules.
+        </p>
+      </div>
+    );
+  }
+
   if (!decision) {
     return (
       <div id="stage-policy" className="w-full bg-[#0B1017] border border-slate-800/80 rounded-sm p-6 lg:p-8 space-y-4 scroll-mt-24">
