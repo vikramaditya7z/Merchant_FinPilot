@@ -252,6 +252,67 @@ runTest('Failed job captures worker exception message', () => {
   assert.equal(failedJob.status, 'failed');
 });
 
+// 6. Agent Tool Calls Normalization
+runTest('Agent tool calls normalization extracts concise names and arguments while handling empty records gracefully', () => {
+  function normalizeToolCalls(rawToolList) {
+    if (!rawToolList || !Array.isArray(rawToolList)) return [];
+    return rawToolList.map((tc) => {
+      if (typeof tc === 'string') return { name: tc, argLabel: undefined };
+      const name = tc.tool_name || tc.name || 'tool';
+      const args = tc.arguments || tc.args || {};
+      let argLabel;
+      if (args.dimension) {
+        argLabel = String(args.dimension);
+      } else if (args.action_type) {
+        argLabel = String(args.action_type);
+      } else if (args.granularity_minutes) {
+        argLabel = `${args.granularity_minutes}m`;
+      }
+      return { name, argLabel };
+    });
+  }
+
+  // Gracefully handles undefined / null / empty
+  assert.deepEqual(normalizeToolCalls(undefined), []);
+  assert.deepEqual(normalizeToolCalls(null), []);
+  assert.deepEqual(normalizeToolCalls([]), []);
+
+  // Correctly normalizes structured tool calls
+  const mockTools = [
+    { tool_name: 'get_incident_summary', arguments: {} },
+    { tool_name: 'get_failure_breakdown', arguments: { dimension: 'payment_method' } },
+    { tool_name: 'get_baseline_comparison', arguments: {} },
+    { tool_name: 'get_revenue_exposure', arguments: {} },
+  ];
+  const normalized = normalizeToolCalls(mockTools);
+  assert.equal(normalized.length, 4);
+  assert.equal(normalized[0].name, 'get_incident_summary');
+  assert.equal(normalized[0].argLabel, undefined);
+  assert.equal(normalized[1].name, 'get_failure_breakdown');
+  assert.equal(normalized[1].argLabel, 'payment_method');
+  assert.equal(normalized[2].name, 'get_baseline_comparison');
+  assert.equal(normalized[3].name, 'get_revenue_exposure');
+});
+
+// 7. Scenario Classification Badge Formatting
+runTest('Scenario classification badge formatting derives uppercase label and confidence percentage', () => {
+  function formatScenarioBadge(classification) {
+    if (!classification || !classification.scenario_id) return null;
+    const label = classification.scenario_id.replace(/_/g, ' ').toUpperCase();
+    const confPercent = Math.round((classification.confidence ?? 0) * 100);
+    return `${label} • ${confPercent}% CONFIDENCE`;
+  }
+
+  // Handles null / undefined gracefully
+  assert.equal(formatScenarioBadge(null), null);
+  assert.equal(formatScenarioBadge(undefined), null);
+
+  // Derives correct format from pipeline_result
+  const completedJob = MOCK_JOBS[2];
+  const badge = formatScenarioBadge(completedJob.pipeline_result.scenario_classification);
+  assert.equal(badge, 'UPI FAILURE SPIKE • 92% CONFIDENCE');
+});
+
 console.log(`\nResults: ${passed} passed, ${failed} failed.\n`);
 if (failed > 0) {
   process.exit(1);

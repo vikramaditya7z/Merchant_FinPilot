@@ -119,6 +119,24 @@ export const GeminiAgentCard: React.FC<GeminiAgentCardProps> = ({
     ? (parseFloat(proposedIntent.confidence) * 100).toFixed(0)
     : null;
 
+  const rawToolList = agentResponse.tool_calls_used || (agentResponse as any).tool_calls || [];
+  const toolCalls = Array.isArray(rawToolList)
+    ? rawToolList.map((tc: any) => {
+        if (typeof tc === 'string') return { name: tc, argLabel: undefined };
+        const name = tc.tool_name || tc.name || 'tool';
+        const args = tc.arguments || tc.args || {};
+        let argLabel: string | undefined;
+        if (args.dimension) {
+          argLabel = String(args.dimension);
+        } else if (args.action_type) {
+          argLabel = String(args.action_type);
+        } else if (args.granularity_minutes) {
+          argLabel = `${args.granularity_minutes}m`;
+        }
+        return { name, argLabel };
+      })
+    : [];
+
   return (
     <div id="stage-agent" className="w-full bg-[#0B1017] border border-slate-800/80 rounded-sm p-6 lg:p-8 space-y-6 scroll-mt-24">
       {/* Stage Header */}
@@ -162,6 +180,36 @@ export const GeminiAgentCard: React.FC<GeminiAgentCardProps> = ({
           <span className="text-emerald-400 font-semibold">4. VERIFY FACTS</span>
         </div>
       </div>
+
+      {/* Agent Tool Invocations */}
+      {toolCalls.length > 0 && (
+        <div className="bg-[#0E141D] border border-slate-800/80 p-3.5 rounded-sm space-y-2 font-mono">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold flex items-center gap-1.5">
+              <span>AGENT INVESTIGATION TOOL CALLS</span>
+              <span className="text-blue-400 text-xs font-bold">({toolCalls.length})</span>
+            </span>
+            <span className="text-[9px] text-slate-500 uppercase">Deterministic Read-Only Functions</span>
+          </div>
+          <div className="flex flex-wrap gap-2 pt-0.5">
+            {toolCalls.map((tc, idx) => (
+              <div
+                key={idx}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm bg-[#070A0F] border border-slate-700/60 text-[11px] text-slate-300"
+              >
+                <span className="text-blue-400">🔧</span>
+                <span className="font-semibold text-slate-200">{tc.name}</span>
+                {tc.argLabel && (
+                  <>
+                    <span className="text-slate-600">•</span>
+                    <span className="text-blue-300/90">{tc.argLabel}</span>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Horizontal 3-Part Analysis Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">

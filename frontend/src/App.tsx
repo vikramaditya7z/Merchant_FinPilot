@@ -698,8 +698,8 @@ export const App: React.FC = () => {
         {/* ═══ INCIDENT HERO SUMMARY ═══ */}
         {incident ? (
           <div className="border-b border-slate-800/80 pb-6 space-y-4">
-            <div className="flex items-baseline justify-between">
-              <div className="flex items-baseline gap-4">
+            <div className="flex items-baseline justify-between flex-wrap gap-3">
+              <div className="flex items-baseline gap-4 flex-wrap">
                 <h1 className="text-3xl font-bold tracking-tight text-white uppercase">
                   {incident.incident_type.replace(/_/g, ' ')}
                 </h1>
@@ -710,6 +710,15 @@ export const App: React.FC = () => {
                 }`}>
                   {incident.severity} SEVERITY
                 </span>
+                {response?.scenario_classification && (
+                  <span className="text-[10px] font-mono font-bold tracking-wider uppercase px-2.5 py-0.5 rounded-sm bg-blue-950/60 text-blue-300 border border-blue-800/60 inline-flex items-center gap-1.5">
+                    <span>{response.scenario_classification.scenario_id.replace(/_/g, ' ')}</span>
+                    <span className="text-slate-600">•</span>
+                    <span className="text-emerald-400">
+                      {Math.round(response.scenario_classification.confidence * 100)}% CONFIDENCE
+                    </span>
+                  </span>
+                )}
               </div>
               <span className="text-xs font-mono text-slate-500">
                 ID: {incident.incident_id}
@@ -806,6 +815,7 @@ export const App: React.FC = () => {
             incident={response?.incident || null}
             summary={response?.summary || ''}
             timing={stageTimings.detection}
+            scenarioClassification={response?.scenario_classification || null}
           />
 
           {/* Stage 02: Investigation */}

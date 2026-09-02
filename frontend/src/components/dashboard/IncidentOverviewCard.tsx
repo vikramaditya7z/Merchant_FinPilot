@@ -6,11 +6,19 @@ interface IncidentOverviewCardProps {
   incident: IncidentDetails | null;
   summary?: string;
   timing?: StageExecutionTiming;
+  scenarioClassification?: {
+    scenario_id: string;
+    confidence: number;
+    rationale?: string;
+    is_incident?: boolean;
+    is_action_eligible?: boolean;
+  } | null;
 }
 
 export const IncidentOverviewCard: React.FC<IncidentOverviewCardProps> = ({
   incident,
   timing,
+  scenarioClassification,
 }) => {
   const status = timing?.status || (incident ? 'completed' : 'waiting');
 
@@ -123,6 +131,13 @@ export const IncidentOverviewCard: React.FC<IncidentOverviewCardProps> = ({
           </span>
         </div>
         <div className="flex items-center gap-3">
+          {scenarioClassification && (
+            <span className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm bg-blue-950/40 text-blue-300 border border-blue-800/40 text-[10px] font-mono font-bold tracking-wider uppercase">
+              <span>{scenarioClassification.scenario_id.replace(/_/g, ' ')}</span>
+              <span className="text-slate-600">•</span>
+              <span className="text-emerald-400">{Math.round(scenarioClassification.confidence * 100)}% CONFIDENCE</span>
+            </span>
+          )}
           <span className={`text-[10px] font-mono uppercase tracking-widest font-bold px-2 py-0.5 rounded-sm border ${
             incident.severity === 'high' 
               ? 'bg-rose-950/40 text-rose-400 border-rose-800/40' 
@@ -145,8 +160,17 @@ export const IncidentOverviewCard: React.FC<IncidentOverviewCardProps> = ({
             <span className="text-[10px] font-mono uppercase tracking-widest text-slate-500 font-semibold block mb-1">
               Triggered Anomaly
             </span>
-            <div className="text-2xl font-bold tracking-tight text-white uppercase">
-              {incident.incident_type.replace(/_/g, ' ')}
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="text-2xl font-bold tracking-tight text-white uppercase">
+                {incident.incident_type.replace(/_/g, ' ')}
+              </div>
+              {scenarioClassification && (
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm bg-blue-950/60 text-blue-300 border border-blue-800/60 text-[10px] font-mono font-bold tracking-wider uppercase">
+                  <span>{scenarioClassification.scenario_id.replace(/_/g, ' ')}</span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-emerald-400">{Math.round(scenarioClassification.confidence * 100)}% CONFIDENCE</span>
+                </span>
+              )}
             </div>
             <div className="text-xs font-mono text-slate-400 mt-1">
               Incident ID: {incident.incident_id}

@@ -63,6 +63,14 @@ export interface AgentFinding {
   summary: string;
 }
 
+export interface ToolCallRecord {
+  call_id?: string;
+  tool_name: string;
+  arguments?: Record<string, any>;
+  success?: boolean;
+  result_digest?: string;
+}
+
 export interface AgentResponseData {
   incident_id: string;
   reasoning: string;
@@ -72,6 +80,7 @@ export interface AgentResponseData {
   model_id: string;
   prompt_version: string;
   iterations_count: number;
+  tool_calls_used?: ToolCallRecord[];
 }
 
 export interface ProposedIntent {
