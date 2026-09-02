@@ -129,11 +129,14 @@ const STAGE_ORDER = [
 ];
 
 function deriveStageTimings(res, jobStatus) {
+  const normStatus = (jobStatus || '').toLowerCase();
+  const isProcessing = normStatus === 'processing';
+  const isFailed = normStatus === 'failed';
+
   if (!res) {
-    const isProcessing = jobStatus === 'processing' || jobStatus === 'queued';
     return {
       timings: {
-        detection: { status: isProcessing ? 'running' : 'waiting' },
+        detection: { status: isProcessing ? 'running' : isFailed ? 'failed' : 'waiting' },
         investigation: { status: 'waiting' },
         agent: { status: 'waiting' },
         verification: { status: 'waiting' },
@@ -166,13 +169,19 @@ function deriveStageTimings(res, jobStatus) {
       };
     } else if (idx === finalIdx) {
       timings[sId] = {
-        status: res.is_failed ? 'failed' : res.is_stopped ? 'blocked' : 'completed',
+        status: res.is_failed
+          ? 'failed'
+          : res.is_stopped
+          ? 'blocked'
+          : isProcessing && !res.is_completed
+          ? 'running'
+          : 'completed',
         startedAt: res.started_at,
         completedAt: res.completed_at,
         details: res.stop_reason || undefined,
       };
     } else {
-      timings[sId] = { status: 'skipped' };
+      timings[sId] = { status: isProcessing ? 'waiting' : 'skipped' };
     }
   });
 
@@ -311,6 +320,178 @@ runTest('Scenario classification badge formatting derives uppercase label and co
   const completedJob = MOCK_JOBS[2];
   const badge = formatScenarioBadge(completedJob.pipeline_result.scenario_classification);
   assert.equal(badge, 'UPI FAILURE SPIKE • 92% CONFIDENCE');
+});
+
+// 8. Selection State Manager Helper (Mimics App.tsx selection flow)
+class DashboardSelectionManager {
+  constructor() {
+    this.selectedJobId = null;
+    this.selectedJobIdRef = { current: null };
+    this.response = null;
+    this.stageTimings = deriveStageTimings(null);
+    this.activeStageIndex = 0;
+    this.error = null;
+  }
+
+  selectJob(job) {
+    this.selectedJobIdRef.current = job.job_id;
+    this.selectedJobId = job.job_id;
+    this.error = job.status === 'failed' ? (job.error_message || 'Incident job execution failed') : null;
+
+    // Immediate state reset / hydration
+    const initialResult = job.pipeline_result || null;
+    this.response = initialResult;
+    const { timings, finalIdx } = deriveStageTimings(initialResult, job.status);
+    this.stageTimings = timings;
+    this.activeStageIndex = finalIdx;
+  }
+
+  applyAsyncDetail(jobId, detailed) {
+    // Race condition guard: discard if selected job changed
+    if (this.selectedJobIdRef.current !== jobId) {
+      return false;
+    }
+    const freshResult = detailed.pipeline_result || null;
+    this.response = freshResult;
+    const { timings, finalIdx } = deriveStageTimings(freshResult, detailed.status);
+    this.stageTimings = timings;
+    this.activeStageIndex = finalIdx;
+    if (detailed.status === 'failed') {
+      this.error = detailed.error_message || 'Incident job execution failed';
+    }
+    return true;
+  }
+
+  syncFromPolling(fetchedJobs) {
+    const currentId = this.selectedJobIdRef.current;
+    if (!currentId) return;
+    const activeJob = fetchedJobs.find((j) => j.job_id === currentId);
+    if (activeJob && this.selectedJobIdRef.current === currentId) {
+      const freshResult = activeJob.pipeline_result || null;
+      this.response = freshResult;
+      const { timings, finalIdx } = deriveStageTimings(freshResult, activeJob.status);
+      this.stageTimings = timings;
+      this.activeStageIndex = finalIdx;
+      if (activeJob.status === 'failed') {
+        this.error = activeJob.error_message || 'Incident job execution failed';
+      }
+    }
+  }
+}
+
+// 9. Immediate Invalidation on Selection Change
+runTest('Selecting job B immediately stops displaying job A details and clears response', () => {
+  const mgr = new DashboardSelectionManager();
+  const jobA = MOCK_JOBS[2]; // completed job with full pipeline_result
+  const jobB = MOCK_JOBS[0]; // queued job with null pipeline_result
+
+  mgr.selectJob(jobA);
+  assert.equal(mgr.selectedJobId, 'job_trig_003_completed');
+  assert.notEqual(mgr.response, null);
+  assert.equal(mgr.response.run_id, 'run_003');
+
+  // Immediately switch to job B
+  mgr.selectJob(jobB);
+  assert.equal(mgr.selectedJobId, 'job_trig_001_queued');
+  // Stale incident from job A MUST be completely gone immediately!
+  assert.equal(mgr.response, null);
+  assert.equal(mgr.stageTimings.detection.status, 'waiting');
+  assert.equal(mgr.activeStageIndex, 0);
+});
+
+// 10. Immediate Processing Pipeline State & Partial Progress Hydration
+runTest('Selecting a PROCESSING job shows running pipeline state immediately, and progressive partial data renders running stage', () => {
+  const mgr = new DashboardSelectionManager();
+  const completedJob = MOCK_JOBS[2];
+  const processingJob = MOCK_JOBS[1];
+
+  mgr.selectJob(completedJob);
+  assert.notEqual(mgr.response, null);
+
+  // Switch to newly processing job (no pipeline_result yet)
+  mgr.selectJob(processingJob);
+  assert.equal(mgr.selectedJobId, 'job_trig_002_processing');
+  assert.equal(mgr.response, null); // No stale completed details
+  assert.equal(mgr.stageTimings.detection.status, 'running');
+  assert.equal(mgr.stageTimings.investigation.status, 'waiting');
+
+  // Partial pipeline data received while processing (e.g. at stage 'investigation')
+  const partialProcessingResult = {
+    final_stage: 'investigation',
+    is_completed: false,
+    started_at: '2026-09-01T12:01:00Z',
+    incident: { incident_id: 'inc_partial_001' },
+  };
+  const { timings, finalIdx } = deriveStageTimings(partialProcessingResult, 'processing');
+  assert.equal(finalIdx, 1);
+  assert.equal(timings.detection.status, 'completed');
+  assert.equal(timings.investigation.status, 'running');
+  assert.equal(timings.agent.status, 'waiting');
+});
+
+// 11. Queued Job Shows Clean Waiting State Without Stale Incident Details
+runTest('Selecting a QUEUED job does not show stale incident details and puts all stages in waiting', () => {
+  const mgr = new DashboardSelectionManager();
+  const completedJob = MOCK_JOBS[2];
+  const queuedJob = MOCK_JOBS[0];
+
+  mgr.selectJob(completedJob);
+  assert.notEqual(mgr.response, null);
+
+  mgr.selectJob(queuedJob);
+  assert.equal(mgr.selectedJobId, 'job_trig_001_queued');
+  assert.equal(mgr.response, null);
+  assert.equal(mgr.stageTimings.detection.status, 'waiting');
+  assert.equal(mgr.stageTimings.investigation.status, 'waiting');
+  assert.equal(mgr.stageTimings.agent.status, 'waiting');
+  assert.equal(mgr.stageTimings.verification.status, 'waiting');
+  assert.equal(mgr.stageTimings.policy.status, 'waiting');
+  assert.equal(mgr.stageTimings.execution.status, 'waiting');
+});
+
+// 12. Race Condition Guard Against Stale Async Polling Overwrite
+runTest('A late polling or detail response for job A cannot overwrite currently selected job B', () => {
+  const mgr = new DashboardSelectionManager();
+  const jobA = MOCK_JOBS[2]; // completed
+  const jobB = MOCK_JOBS[0]; // queued
+
+  // User starts on job A
+  mgr.selectJob(jobA);
+  assert.equal(mgr.selectedJobId, 'job_trig_003_completed');
+
+  // User quickly switches to job B
+  mgr.selectJob(jobB);
+  assert.equal(mgr.selectedJobId, 'job_trig_001_queued');
+  assert.equal(mgr.response, null);
+
+  // Late async response for job A arrives now!
+  const wasApplied = mgr.applyAsyncDetail(jobA.job_id, {
+    status: 'completed',
+    pipeline_result: jobA.pipeline_result,
+  });
+
+  // Guard must reject the stale response!
+  assert.equal(wasApplied, false);
+  assert.equal(mgr.selectedJobId, 'job_trig_001_queued');
+  assert.equal(mgr.response, null); // Job B's clean state preserved
+});
+
+// 13. Completed Job Rendering Preservation
+runTest('Existing completed-job rendering hydrates full response and marks all 6 stages completed', () => {
+  const mgr = new DashboardSelectionManager();
+  const completedJob = MOCK_JOBS[2];
+
+  mgr.selectJob(completedJob);
+  assert.equal(mgr.selectedJobId, 'job_trig_003_completed');
+  assert.notEqual(mgr.response, null);
+  assert.equal(mgr.response.run_id, 'run_003');
+  assert.equal(mgr.activeStageIndex, 5);
+  assert.equal(mgr.stageTimings.detection.status, 'completed');
+  assert.equal(mgr.stageTimings.investigation.status, 'completed');
+  assert.equal(mgr.stageTimings.agent.status, 'completed');
+  assert.equal(mgr.stageTimings.verification.status, 'completed');
+  assert.equal(mgr.stageTimings.policy.status, 'completed');
+  assert.equal(mgr.stageTimings.execution.status, 'completed');
 });
 
 console.log(`\nResults: ${passed} passed, ${failed} failed.\n`);

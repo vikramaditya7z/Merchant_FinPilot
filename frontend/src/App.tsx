@@ -134,11 +134,14 @@ const deriveStageTimings = (res: ProcessIncidentResponse | null, jobStatus?: str
   timings: Record<StageId, StageExecutionTiming>;
   finalIdx: number;
 } => {
+  const normStatus = (jobStatus || '').toLowerCase();
+  const isProcessing = normStatus === 'processing';
+  const isFailed = normStatus === 'failed';
+
   if (!res) {
-    const isProcessing = jobStatus === 'processing' || jobStatus === 'queued';
     return {
       timings: {
-        detection: { status: isProcessing ? 'running' : 'waiting' },
+        detection: { status: isProcessing ? 'running' : isFailed ? 'failed' : 'waiting' },
         investigation: { status: 'waiting' },
         agent: { status: 'waiting' },
         verification: { status: 'waiting' },
@@ -171,13 +174,19 @@ const deriveStageTimings = (res: ProcessIncidentResponse | null, jobStatus?: str
       };
     } else if (idx === finalIdx) {
       timings[sId] = {
-        status: res.is_failed ? 'failed' : res.is_stopped ? 'blocked' : 'completed',
+        status: res.is_failed
+          ? 'failed'
+          : res.is_stopped
+          ? 'blocked'
+          : isProcessing && !res.is_completed
+          ? 'running'
+          : 'completed',
         startedAt: res.started_at,
         completedAt: res.completed_at,
         details: res.stop_reason || undefined,
       };
     } else {
-      timings[sId] = { status: 'skipped' };
+      timings[sId] = { status: isProcessing ? 'waiting' : 'skipped' };
     }
   });
 
@@ -216,6 +225,8 @@ export const App: React.FC = () => {
   const sessionRunIdRef = useRef<number>(0);
   const activeRunIdRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Selected job ref to prevent race conditions during async fetches and polling
+  const selectedJobIdRef = useRef<string | null>(null);
 
   // Cleanup abort controller on component unmount
   useEffect(() => {
@@ -235,14 +246,20 @@ export const App: React.FC = () => {
       setLastRefreshedAt(new Date());
       setJobsError(null);
 
-      // If a job is currently selected and still active, refresh its details
-      if (selectedJobId) {
-        const activeJobInList = fetchedJobs.find((j) => j.job_id === selectedJobId);
-        if (activeJobInList && activeJobInList.pipeline_result) {
-          setResponse(activeJobInList.pipeline_result);
-          const { timings, finalIdx } = deriveStageTimings(activeJobInList.pipeline_result, activeJobInList.status);
+      // If a job is currently selected, progressively update its state from the fresh jobs list
+      const currentSelectedId = selectedJobIdRef.current;
+      if (currentSelectedId) {
+        const activeJobInList = fetchedJobs.find((j) => j.job_id === currentSelectedId);
+        if (activeJobInList && selectedJobIdRef.current === currentSelectedId) {
+          const freshResult = activeJobInList.pipeline_result || null;
+          setResponse(freshResult);
+          const { timings, finalIdx } = deriveStageTimings(freshResult, activeJobInList.status);
           setStageTimings(timings);
           setActiveStageIndex(finalIdx);
+
+          if (activeJobInList.status === 'failed') {
+            setError(activeJobInList.error_message || 'Incident job execution failed');
+          }
         }
       }
     } catch (err: any) {
@@ -282,32 +299,47 @@ export const App: React.FC = () => {
   }, [jobs, selectedJobId]);
 
   const handleSelectJob = async (job: IncidentJob) => {
+    // 1. Immediately update ref and state so this selected job is the single source of truth
+    selectedJobIdRef.current = job.job_id;
     setSelectedJobId(job.job_id);
-    setError(null);
 
-    if (job.pipeline_result) {
-      setResponse(job.pipeline_result);
-      const { timings, finalIdx } = deriveStageTimings(job.pipeline_result, job.status);
-      setStageTimings(timings);
-      setActiveStageIndex(finalIdx);
+    // 2. Immediately set or clear error
+    if (job.status === 'failed') {
+      setError(job.error_message || 'Incident job execution failed');
     } else {
-      const { timings, finalIdx } = deriveStageTimings(null, job.status);
-      setStageTimings(timings);
-      setActiveStageIndex(finalIdx);
+      setError(null);
     }
 
+    // 3. Immediately update or reset response and derive stage timings for THIS job.
+    // If this job has no pipeline_result yet (e.g. queued or newly processing), setResponse(null)
+    // guarantees that stale details from previously selected jobs are completely removed immediately.
+    const initialResult = job.pipeline_result || null;
+    setResponse(initialResult);
+    const { timings, finalIdx } = deriveStageTimings(initialResult, job.status);
+    setStageTimings(timings);
+    setActiveStageIndex(finalIdx);
+
+    // 4. Fetch the latest detailed record for this job (e.g. if updated on backend)
     try {
       const detailed = await apiClient.getIncidentJob(job.job_id);
-      if (detailed.pipeline_result) {
-        setResponse(detailed.pipeline_result);
-        const { timings, finalIdx } = deriveStageTimings(detailed.pipeline_result, detailed.status);
-        setStageTimings(timings);
-        setActiveStageIndex(finalIdx);
-      } else if (detailed.status === 'failed') {
+      // Race condition protection: if user clicked another job while fetching, discard late response!
+      if (selectedJobIdRef.current !== job.job_id) {
+        return;
+      }
+
+      const freshResult = detailed.pipeline_result || null;
+      setResponse(freshResult);
+      const { timings: freshTimings, finalIdx: freshIdx } = deriveStageTimings(freshResult, detailed.status);
+      setStageTimings(freshTimings);
+      setActiveStageIndex(freshIdx);
+
+      if (detailed.status === 'failed') {
         setError(detailed.error_message || 'Incident job execution failed');
       }
     } catch (err: any) {
-      console.warn(`Failed to fetch job detail for ${job.job_id}:`, err);
+      if (selectedJobIdRef.current === job.job_id) {
+        console.warn(`Failed to fetch job detail for ${job.job_id}:`, err);
+      }
     }
   };
 
@@ -323,6 +355,7 @@ export const App: React.FC = () => {
     const currentSessionId = Date.now();
     sessionRunIdRef.current = currentSessionId;
     activeRunIdRef.current = null;
+    selectedJobIdRef.current = null;
     setSelectedJobId(null);
 
     setIsLoading(true);
@@ -667,15 +700,37 @@ export const App: React.FC = () => {
                 Inspecting Incident Job
               </span>
               <span className="text-slate-200 font-bold">{selectedJobId}</span>
-              {response?.merchant_id && (
-                <span className="text-slate-400">(@{response.merchant_id})</span>
-              )}
+              {(() => {
+                const selJob = jobs.find((j) => j.job_id === selectedJobId);
+                const merchant = selJob?.merchant_id || response?.merchant_id;
+                const status = selJob?.status;
+                return (
+                  <>
+                    {merchant && <span className="text-slate-400">(@{merchant})</span>}
+                    {status && (
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold tracking-wider ${
+                        status === 'completed'
+                          ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40'
+                          : status === 'processing'
+                          ? 'bg-blue-950/80 text-blue-300 border border-blue-500/50 animate-pulse'
+                          : status === 'failed'
+                          ? 'bg-rose-950/60 text-rose-400 border border-rose-800/40'
+                          : 'bg-slate-800/80 text-slate-400 border border-slate-700'
+                      }`}>
+                        {status}
+                      </span>
+                    )}
+                  </>
+                );
+              })()}
             </div>
             <button
               type="button"
               onClick={() => {
+                selectedJobIdRef.current = null;
                 setSelectedJobId(null);
                 setResponse(null);
+                setError(null);
                 const { timings, finalIdx } = deriveStageTimings(null);
                 setStageTimings(timings);
                 setActiveStageIndex(finalIdx);
