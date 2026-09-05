@@ -10,6 +10,7 @@
 [![Release](https://img.shields.io/badge/Release-Ready-brightgreen)](#validation--release-status)
 
 Merchant FinPilot is an AI-native financial incident response platform designed for digital merchants processing payments at scale. It continuously detects statistical payment anomalies against historical baselines, investigates root causes using dimensional breakdown slicing, formulates remediation intents via Google Gemini, and enforces **strict deterministic mathematical verification and policy authorization before any simulated execution can occur**.
+**LINK:**https://merchant-fin-pilot.vercel.app/
 
 ---
 
